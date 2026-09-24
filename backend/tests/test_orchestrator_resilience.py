@@ -4,6 +4,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 
+from sibling_repos import requires_ulrpm_orchestrator
+
+pytestmark = requires_ulrpm_orchestrator
 
 FLOW_PATH = (
     Path(__file__).parents[3]

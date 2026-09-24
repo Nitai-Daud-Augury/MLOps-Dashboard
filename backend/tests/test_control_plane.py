@@ -12,6 +12,7 @@ from backfill_dashboard.control_plane.machine_control import apply_machine_actio
 from backfill_dashboard.control_plane.workflow_adapter import WorkflowIdentity
 from backfill_dashboard.control_plane.database import Database
 from backfill_dashboard.control_plane.schema import SCHEMA
+from sibling_repos import requires_canonical_classifier
 
 
 class Source:
@@ -58,6 +59,7 @@ def build_plane(tmp_path: Path, monkeypatch) -> ControlPlane:
     return ControlPlane(settings, Source(), "healthy", manifest_writer=None)
 
 
+@requires_canonical_classifier
 def test_inventory_snapshot_estimate_and_campaign_are_durable(tmp_path, monkeypatch):
     plane = build_plane(tmp_path, monkeypatch)
     result = plane.synchronizer.sync()
@@ -86,6 +88,7 @@ def test_inventory_snapshot_estimate_and_campaign_are_durable(tmp_path, monkeypa
     assert state["work_item_counts"]["succeeded"] == 1
 
 
+@requires_canonical_classifier
 def test_signed_estimate_rejects_changed_inventory(tmp_path, monkeypatch):
     plane = build_plane(tmp_path, monkeypatch)
     plane.synchronizer.sync()
@@ -102,6 +105,7 @@ def test_signed_estimate_rejects_changed_inventory(tmp_path, monkeypatch):
         raise AssertionError("changed inventory was accepted")
 
 
+@requires_canonical_classifier
 def test_dispatcher_routes_only_matching_profile(tmp_path, monkeypatch):
     plane = build_plane(tmp_path, monkeypatch)
     plane.synchronizer.sync()
@@ -122,6 +126,7 @@ def test_dispatcher_routes_only_matching_profile(tmp_path, monkeypatch):
     assert len(submitted) == 1
 
 
+@requires_canonical_classifier
 def test_production_submission_is_blocked_by_global_readiness(tmp_path, monkeypatch):
     plane = build_plane(tmp_path, monkeypatch)
     plane.synchronizer.sync()
@@ -138,6 +143,7 @@ def test_production_submission_is_blocked_by_global_readiness(tmp_path, monkeypa
         raise AssertionError("production campaign bypassed readiness")
 
 
+@requires_canonical_classifier
 def test_repeated_failures_auto_pause_campaign(tmp_path, monkeypatch):
     monkeypatch.setenv("BACKFILL_AUTO_PAUSE_FAILURES", "2")
     plane = build_plane(tmp_path, monkeypatch)
@@ -154,6 +160,7 @@ def test_repeated_failures_auto_pause_campaign(tmp_path, monkeypatch):
     assert plane.campaigns.get(campaign["id"])["state"] == "paused"
 
 
+@requires_canonical_classifier
 def test_machine_pause_and_resume_controls_dispatch(tmp_path, monkeypatch):
     plane = build_plane(tmp_path, monkeypatch)
     plane.synchronizer.sync()
