@@ -63,9 +63,11 @@ jobs:
     environment:
       name: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'prod' && 'databricks-prod' || 'databricks-dev' }}
     env:
-      DATABRICKS_AUTH_TYPE: github-oidc
+      # POC temporary; revert to github-oidc and drop CLIENT_SECRET when account-admin federation exists; then delete GitHub secret and revoke SP OAuth secret.
+      DATABRICKS_AUTH_TYPE: oauth-m2m
       DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
       DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
       BUNDLE_VAR_mongodb_secret_scope: ${{ vars.MONGODB_SECRET_SCOPE }}
       BUNDLE_VAR_mongodb_secret_key: ${{ vars.MONGODB_SECRET_KEY }}
       REQUESTED_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'dev' }}
@@ -108,7 +110,7 @@ jobs:
       - name: Check required GitHub Environment variables
         run: |
           set -euo pipefail
-          for name in DATABRICKS_HOST DATABRICKS_CLIENT_ID BUNDLE_VAR_mongodb_secret_scope BUNDLE_VAR_mongodb_secret_key; do
+          for name in DATABRICKS_HOST DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET BUNDLE_VAR_mongodb_secret_scope BUNDLE_VAR_mongodb_secret_key; do
             if [[ -z "${!name:-}" ]]; then
               echo "::error::Missing required GitHub Environment variable for $name"
               exit 1

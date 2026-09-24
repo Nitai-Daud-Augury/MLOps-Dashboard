@@ -37,9 +37,11 @@ jobs:
     environment:
       name: ${{ inputs.target == 'prod' && 'databricks-prod' || 'databricks-dev' }}
     env:
-      DATABRICKS_AUTH_TYPE: github-oidc
+      # POC temporary; revert to github-oidc and drop CLIENT_SECRET when account-admin federation exists; then delete GitHub secret and revoke SP OAuth secret.
+      DATABRICKS_AUTH_TYPE: oauth-m2m
       DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
       DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
       REQUESTED_TARGET: ${{ inputs.target }}
       REQUESTED_ACTION: ${{ inputs.action }}
     steps:
@@ -61,7 +63,7 @@ jobs:
       - name: Check required GitHub Environment variables
         run: |
           set -euo pipefail
-          for name in DATABRICKS_HOST DATABRICKS_CLIENT_ID; do
+          for name in DATABRICKS_HOST DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET; do
             if [[ -z "${!name:-}" ]]; then
               echo "::error::Missing required GitHub Environment variable for $name"
               exit 1
