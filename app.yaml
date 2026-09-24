@@ -12,3 +12,9 @@ env:
     value: data/unique_machine_ids.txt
   - name: MONGODB_URL
     valueFrom: mongodb_url
+  - name: FST_PROD_ACCOUNT_NAME
+    value: auguryprodfsthns
+  - name: FST_PROD_CONTAINER
+    value: feature-store-container
+  - name: FST_PROD_ACCOUNT_KEY
+    valueFrom: fst_account_key

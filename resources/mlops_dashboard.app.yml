@@ -14,3 +14,8 @@ resources:
             scope: ${var.mongodb_secret_scope}
             key: ${var.mongodb_secret_key}
             permission: READ
+        - name: fst_account_key
+          secret:
+            scope: ${var.mongodb_secret_scope}
+            key: fst_prod_account_key
+            permission: READ
