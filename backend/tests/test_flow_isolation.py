@@ -1,5 +1,8 @@
 from pathlib import Path
 
+from sibling_repos import requires_flow_sources
+
+pytestmark = requires_flow_sources
 
 ROOT = Path(__file__).resolve().parents[3]
 FLOW = ROOT / "Augury repos" / "metaflow-bx" / "FSTBackfill_prod_flow.py"

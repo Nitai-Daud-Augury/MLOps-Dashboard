@@ -1,6 +1,7 @@
 from backfill_dashboard.inventory_models import MachineSearchQuery
 from backfill_dashboard.mongo_inventory import MongoMachineInventoryProvider
 from backfill_dashboard.inventory_provider import _record
+from sibling_repos import requires_canonical_classifier
 
 
 class Cursor(list):
@@ -22,6 +23,7 @@ class Client(dict):
     def __getitem__(self, name): return dict.__getitem__(self, name)
 
 
+@requires_canonical_classifier
 def test_provider_joins_endpoint_on_nested_machine_id_and_classifies_ulrpm():
     config = {"_id": "m1", "name": "Pump", "status": "active", "components": [],
               "containedIn": {"_id": "site", "name": "Plant", "type": "facility",
@@ -34,6 +36,7 @@ def test_provider_joins_endpoint_on_nested_machine_id_and_classifies_ulrpm():
     assert record.site_id == "site" and record.organization_id == "org"
 
 
+@requires_canonical_classifier
 def test_missing_tags_do_not_hide_recognized_standard_hardware():
     config = {"_id": "m1", "status": "active", "endpoints": [{"type": "apus_alpha"}]}
     db = Database(machine_configurations=Collection([config]), machines=Collection([]), endpoints=Collection([]))
@@ -67,6 +70,7 @@ def test_provider_preserves_machine_name_and_tags_for_test_classification():
     assert record.is_test_machine
 
 
+@requires_canonical_classifier
 def test_provider_uses_ulrpm_endpoint_installation_date():
     config = {
         "_id": "m1",

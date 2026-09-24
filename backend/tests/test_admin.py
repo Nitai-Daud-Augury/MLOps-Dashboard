@@ -24,6 +24,7 @@ from backfill_dashboard.admin import (
 from backfill_dashboard.control_store import JsonControlStore
 from backfill_dashboard.manifests import OrchestratedManifestWriteResult
 from backfill_dashboard.schemas import OrchestratedBackfillRequest, OrchestratedManifestRequest
+from sibling_repos import requires_metaflow_flow
 
 
 def test_workflow_review_repository_persists_acknowledgements(tmp_path):
@@ -153,6 +154,7 @@ def test_admin_action_repository_allows_only_one_preparing_trigger(tmp_path):
     assert next_action.id != pending.id
 
 
+@requires_metaflow_flow
 def test_create_command_uses_metaflow_argo_create():
     builder = WorkflowCommandBuilder()
 

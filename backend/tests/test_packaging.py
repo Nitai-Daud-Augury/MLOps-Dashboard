@@ -66,7 +66,7 @@ def test_bundle_sync_excludes_local_runtime_and_research_content_but_keeps_sourc
         assert (DASHBOARD_ROOT / path).exists()
 
 
-def test_github_workflows_are_pr_safe_oidc_and_cost_conservative():
+def test_github_workflows_are_pr_safe_oauth_m2m_poc_and_cost_conservative():
     workflow_root = DASHBOARD_ROOT / ".github" / "workflows"
     ci = yaml.load((workflow_root / "ci.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     deploy = yaml.load((workflow_root / "deploy.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
@@ -98,9 +98,13 @@ def test_github_workflows_are_pr_safe_oidc_and_cost_conservative():
     deploy_job = deploy["jobs"]["deploy"]
     assert "databricks-prod" in deploy_job["environment"]["name"]
     assert "databricks-dev" in deploy_job["environment"]["name"]
-    assert deploy_job["env"]["DATABRICKS_AUTH_TYPE"] == "github-oidc"
+    # POC temporary: oauth-m2m plus a GitHub Environment secret reference.
+    # github-oidc is the long-term target. Revert these assertions to github-oidc
+    # and drop CLIENT_SECRET when account-admin federation lands.
+    assert deploy_job["env"]["DATABRICKS_AUTH_TYPE"] == "oauth-m2m"
     assert deploy_job["env"]["DATABRICKS_HOST"] == "${{ vars.DATABRICKS_HOST }}"
     assert deploy_job["env"]["DATABRICKS_CLIENT_ID"] == "${{ vars.DATABRICKS_CLIENT_ID }}"
+    assert deploy_job["env"]["DATABRICKS_CLIENT_SECRET"] == "${{ secrets.DATABRICKS_CLIENT_SECRET }}"
     assert deploy_job["env"]["BUNDLE_VAR_mongodb_secret_scope"] == "${{ vars.MONGODB_SECRET_SCOPE }}"
     assert deploy_job["env"]["BUNDLE_VAR_mongodb_secret_key"] == "${{ vars.MONGODB_SECRET_KEY }}"
     dispatch_inputs = deploy["on"]["workflow_dispatch"]["inputs"]
@@ -132,9 +136,12 @@ def test_github_workflows_are_pr_safe_oidc_and_cost_conservative():
     assert control_inputs["action"]["type"] == "choice" and control_inputs["action"]["options"] == ["status", "start", "stop"]
     assert "databricks-prod" in control["jobs"]["control"]["environment"]["name"]
     control_job = control["jobs"]["control"]
-    assert control_job["env"]["DATABRICKS_AUTH_TYPE"] == "github-oidc"
+    # Same POC auth as deploy. Revert to github-oidc and drop CLIENT_SECRET
+    # when account-admin federation lands.
+    assert control_job["env"]["DATABRICKS_AUTH_TYPE"] == "oauth-m2m"
     assert control_job["env"]["DATABRICKS_HOST"] == "${{ vars.DATABRICKS_HOST }}"
     assert control_job["env"]["DATABRICKS_CLIENT_ID"] == "${{ vars.DATABRICKS_CLIENT_ID }}"
+    assert control_job["env"]["DATABRICKS_CLIENT_SECRET"] == "${{ secrets.DATABRICKS_CLIENT_SECRET }}"
     control_steps = control["jobs"]["control"]["steps"]
     assert any("databricks apps get" in step.get("run", "") for step in control_steps)
     assert any("databricks apps start" in step.get("run", "") for step in control_steps)
@@ -143,7 +150,8 @@ def test_github_workflows_are_pr_safe_oidc_and_cost_conservative():
     assert "mlops-dashboard-dev" in control_target_script and "mlops-dashboard" in control_target_script
 
     all_workflows = "\n".join(path.read_text(encoding="utf-8") for path in workflow_root.glob("*.yml"))
-    assert "secrets." not in all_workflows
+    # The POC references the Environment secret name only. No secret values belong in the repo.
+    assert set(re.findall(r"secrets\.[A-Za-z0-9_]+", all_workflows)) == {"secrets.DATABRICKS_CLIENT_SECRET"}
     assert "DATABRICKS_TOKEN" not in all_workflows
     assert "BUNDLE_VAR_mongodb_secret_scope" in all_workflows
     assert "BUNDLE_VAR_mongodb_secret_key" in all_workflows

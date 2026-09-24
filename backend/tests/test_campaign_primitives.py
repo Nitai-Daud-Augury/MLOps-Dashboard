@@ -7,8 +7,10 @@ from backfill_dashboard.capacity import NodeCapacity, recommend_concurrency
 from backfill_dashboard.classification import classify_machine
 from backfill_dashboard.estimation import allocated_cost, makespan_estimate
 from backfill_dashboard.inventory_models import MachineRecord
+from sibling_repos import requires_canonical_classifier
 
 
+@requires_canonical_classifier
 def test_classification_fails_closed_and_mixed_hardware_is_ulrpm():
     assert classify_machine({"tags": [], "endpoints": [{"type": "apus_alpha"}]}).cohort == "standard"
     assert classify_machine({"tags": [], "endpoints": [{"type": "apus_alpha"}, {"type": "low_rpm_us"}]}).cohort == "ulrpm"
