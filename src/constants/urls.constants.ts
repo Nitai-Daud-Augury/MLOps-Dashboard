@@ -1,0 +1,9 @@
+export const PROD_ACCOUNT = 'auguryprodfsthns';
+export const PROD_CONTAINER = 'feature-store-container';
+export const TEST_ACCOUNT = 'auguryodefeaturestore';
+export const TEST_CONTAINER = 'ulrpm-fst-dev-20260830-feature-store';
+export const DEFAULT_DEV_NAMESPACE = 'ulrpm-fst-dev-20260830';
+export const PROD_CONFIRMATION = 'RUN_PROD_BACKFILL';
+export const OUTERBOUNDS_BASE = 'https://ui.augury.obp.outerbounds.com/dashboard/runs/p/default';
+export const DEFAULT_OUTERBOUNDS_URL = `${OUTERBOUNDS_BASE}?flow_id=FSTBackfill`;
+export const BLOB_SOURCE_STORAGE_KEY = 'ulrpm-blob-source';

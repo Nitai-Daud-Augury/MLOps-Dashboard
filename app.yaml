@@ -1,0 +1,14 @@
+command:
+  - python
+  - run.py
+env:
+  - name: MLOPS_DASHBOARD_RUNTIME
+    value: databricks
+  - name: BACKFILL_DISPATCH_ENABLED
+    value: "0"
+  - name: BACKFILL_PRODUCTION_MODE
+    value: "0"
+  - name: ULRPM_MACHINE_IDS_FILE
+    value: data/unique_machine_ids.txt
+  - name: MONGODB_URL
+    valueFrom: mongodb_url

@@ -1,0 +1,44 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --bg-page: #F4F6FA; --bg-surface: #FFFFFF; --bg-surface-alt: #EDF0F7; --bg-elevated: #FFFFFF; --bg-inset: #E8EDF5;
+  --text-primary: #0D1B3E; --text-secondary: #4A5568; --text-muted: #7A8599; --text-inverse: #FFFFFF;
+  --accent: #00A3BF; --accent-hover: #008DA6; --accent-subtle: #E0F7FA; --accent-text: #006064;
+  --success: #00C853; --success-bg: #E8F5E9; --success-border: #A5D6A7; --success-text: #1B5E20;
+  --warning: #FF8F00; --warning-bg: #FFF8E1; --warning-border: #FFE082; --warning-text: #E65100;
+  --error: #D50000; --error-bg: #FFEBEE; --error-border: #EF9A9A; --error-text: #B71C1C;
+  --info: #00A3BF; --info-bg: #E0F7FA; --info-border: #80DEEA; --info-text: #006064;
+  --border: #D6DCE8; --border-strong: #B0BAC9; --border-focus: #00A3BF;
+  --shadow-sm: 0 1px 3px rgba(13,27,62,.06); --shadow-md: 0 4px 14px rgba(13,27,62,.10); --shadow-lg: 0 12px 36px rgba(13,27,62,.14); --shadow-hover: 0 8px 24px rgba(13,27,62,.12);
+  --chart-complete: #00C853; --chart-missing: #FF8F00; --chart-error: #D50000; --chart-info: #00A3BF;
+  --terminal-bg: #0B1629; --terminal-line: #122348; --terminal-text: #B0C4DE;
+  --month-backfilled-bg: #E8F5E9; --month-backfilled-border: #66BB6A; --month-backfilled-text: #1B5E20;
+  --month-needs-bg: #FFF8E1; --month-needs-border: #FFB300; --month-needs-text: #E65100;
+  --month-neutral-bg: #EDF0F7; --month-neutral-border: #B0BAC9; --month-neutral-text: #4A5568;
+  --month-error-bg: #FFEBEE; --month-error-border: #EF5350; --month-error-text: #B71C1C;
+  --cohort-standard-bg: #E8F5E9; --cohort-standard-text: #1B5E20; --cohort-ulrpm-bg: #EDE7F6; --cohort-ulrpm-text: #4A148C; --cohort-unknown-bg: #FFF3E0; --cohort-unknown-text: #BF360C;
+  --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px; --radius-pill: 999px;
+  --transition-fast: 120ms ease; --transition-base: 200ms ease; --transition-slow: 300ms ease;
+  color: var(--text-primary); background: var(--bg-page); font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+}
+.dark {
+  --bg-page: #0B1629; --bg-surface: #0D1B3E; --bg-surface-alt: #122348; --bg-elevated: #1A2F5A; --bg-inset: #091220;
+  --text-primary: #E8EDF5; --text-secondary: #94A3B8; --text-muted: #64748B; --text-inverse: #0D1B3E;
+  --accent: #4DD0E1; --accent-hover: #80DEEA; --accent-subtle: rgba(0,163,191,.15); --accent-text: #80DEEA;
+  --success: #69F0AE; --success-bg: rgba(0,200,83,.12); --success-border: rgba(0,200,83,.30); --success-text: #A5D6A7;
+  --warning: #FFB74D; --warning-bg: rgba(255,143,0,.12); --warning-border: rgba(255,143,0,.30); --warning-text: #FFE082;
+  --error: #FF5252; --error-bg: rgba(213,0,0,.12); --error-border: rgba(213,0,0,.30); --error-text: #EF9A9A;
+  --info: #4DD0E1; --info-bg: rgba(0,163,191,.12); --info-border: rgba(0,163,191,.30); --info-text: #80DEEA;
+  --border: #1A2F5A; --border-strong: #243B6E; --border-focus: #4DD0E1;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,.22); --shadow-md: 0 4px 14px rgba(0,0,0,.32); --shadow-lg: 0 12px 36px rgba(0,0,0,.45); --shadow-hover: 0 8px 24px rgba(0,0,0,.38);
+  --chart-complete: #69F0AE; --chart-missing: #FFB74D; --chart-error: #FF5252; --chart-info: #4DD0E1;
+  --terminal-bg: #091220; --terminal-line: #122348; --terminal-text: #B0C4DE;
+  --month-backfilled-bg: rgba(0,200,83,.14); --month-backfilled-border: rgba(105,240,174,.45); --month-backfilled-text: #A5D6A7;
+  --month-needs-bg: rgba(255,143,0,.14); --month-needs-border: rgba(255,183,77,.45); --month-needs-text: #FFE082;
+  --month-neutral-bg: #122348; --month-neutral-border: #243B6E; --month-neutral-text: #94A3B8;
+  --month-error-bg: rgba(213,0,0,.14); --month-error-border: rgba(255,82,82,.45); --month-error-text: #EF9A9A;
+  --cohort-standard-bg: rgba(0,200,83,.14); --cohort-standard-text: #A5D6A7; --cohort-ulrpm-bg: rgba(149,117,205,.18); --cohort-ulrpm-text: #D1C4E9; --cohort-unknown-bg: rgba(255,143,0,.14); --cohort-unknown-text: #FFCC80;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+button, a, input, select { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }

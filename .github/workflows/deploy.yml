@@ -1,0 +1,157 @@
+name: Deploy MLOps Dashboard
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Deployment target (production is manual and approval-gated)
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - prod
+      keep_running:
+        description: Keep the app running after successful readiness checks
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: databricks-app-deploy-${{ github.event_name == 'workflow_dispatch' && inputs.target || 'dev' }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Build and test before deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            backend/requirements.txt
+      - run: python -m pip install -r requirements.txt pytest
+      - run: python -m pytest -q tests
+        working-directory: backend
+
+  deploy:
+    name: Validate, deploy, and verify app
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: ${{ github.event_name == 'workflow_dispatch' && inputs.target == 'prod' && 'databricks-prod' || 'databricks-dev' }}
+    env:
+      DATABRICKS_AUTH_TYPE: github-oidc
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      BUNDLE_VAR_mongodb_secret_scope: ${{ vars.MONGODB_SECRET_SCOPE }}
+      BUNDLE_VAR_mongodb_secret_key: ${{ vars.MONGODB_SECRET_KEY }}
+      REQUESTED_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'dev' }}
+      KEEP_RUNNING_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.keep_running || false }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve fixed target and app name
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME:$REQUESTED_TARGET" in
+            push:dev|workflow_dispatch:dev)
+              target=dev
+              app_name=mlops-dashboard-dev
+              ;;
+            workflow_dispatch:prod)
+              if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+                echo "Production deployments must use the main branch" >&2
+                exit 2
+              fi
+              target=prod
+              app_name=mlops-dashboard
+              ;;
+            *)
+              echo "Unsupported deployment target" >&2
+              exit 2
+              ;;
+          esac
+          keep_running=false
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$KEEP_RUNNING_INPUT" == "true" ]]; then
+            keep_running=true
+          fi
+          {
+            echo "target=$target"
+            echo "app_name=$app_name"
+            echo "keep_running=$keep_running"
+          } >> "$GITHUB_OUTPUT"
+      - name: Check required GitHub Environment variables
+        run: |
+          set -euo pipefail
+          for name in DATABRICKS_HOST DATABRICKS_CLIENT_ID BUNDLE_VAR_mongodb_secret_scope BUNDLE_VAR_mongodb_secret_key; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing required GitHub Environment variable for $name"
+              exit 1
+            fi
+          done
+      - uses: databricks/setup-cli@v1.10.0
+      - name: Validate bundle
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+        run: databricks bundle validate --target "$TARGET"
+      - name: Deploy bundle
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+        run: databricks bundle deploy --target "$TARGET"
+      - name: Mark app start for guaranteed cleanup
+        id: mark_start
+        run: echo "attempted=true" >> "$GITHUB_OUTPUT"
+      - name: Apply app source and start for readiness check
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+        run: databricks bundle run mlops_dashboard --target "$TARGET"
+      - name: Wait for app to report RUNNING
+        env:
+          APP_NAME: ${{ steps.target.outputs.app_name }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            app_json="$(databricks apps get "$APP_NAME" --output json)"
+            state="$(jq -r '.app_status.state // empty' <<< "$app_json")"
+            echo "App readiness check $attempt/20: $state"
+            if [[ "$state" == "RUNNING" ]]; then
+              exit 0
+            fi
+            if [[ "$state" == "ERROR" || "$state" == "DELETING" ]]; then
+              echo "App entered terminal state: $state" >&2
+              exit 1
+            fi
+            sleep 15
+          done
+          echo "App did not report RUNNING within 5 minutes" >&2
+          exit 1
+      - name: Stop app unless explicitly kept running
+        if: ${{ always() && steps.mark_start.outputs.attempted == 'true' && (steps.target.outputs.keep_running != 'true' || failure()) }}
+        env:
+          APP_NAME: ${{ steps.target.outputs.app_name }}
+        run: databricks apps stop "$APP_NAME" --timeout 20m

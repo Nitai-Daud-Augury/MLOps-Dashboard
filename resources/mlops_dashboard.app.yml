@@ -1,0 +1,16 @@
+resources:
+  apps:
+    mlops_dashboard:
+      name: ${var.app_name}
+      description: MLOps Dashboard
+      source_code_path: ..
+      lifecycle:
+        # bundle deploy prepares the app but does not start compute. Starting is
+        # an explicit `databricks bundle run mlops_dashboard -t <target>` action.
+        started: false
+      resources:
+        - name: mongodb_url
+          secret:
+            scope: ${var.mongodb_secret_scope}
+            key: ${var.mongodb_secret_key}
+            permission: READ

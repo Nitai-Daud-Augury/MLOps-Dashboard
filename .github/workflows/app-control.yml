@@ -1,0 +1,92 @@
+name: MLOps Dashboard app control
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: App environment to control
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - prod
+      action:
+        description: Requested lifecycle operation
+        type: choice
+        required: true
+        default: status
+        options:
+          - status
+          - start
+          - stop
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: databricks-app-control-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  control:
+    name: Explicit app lifecycle control
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: ${{ inputs.target == 'prod' && 'databricks-prod' || 'databricks-dev' }}
+    env:
+      DATABRICKS_AUTH_TYPE: github-oidc
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      REQUESTED_TARGET: ${{ inputs.target }}
+      REQUESTED_ACTION: ${{ inputs.action }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve fixed app name
+        id: target
+        run: |
+          set -euo pipefail
+          case "$REQUESTED_TARGET" in
+            dev) app_name=mlops-dashboard-dev ;;
+            prod) app_name=mlops-dashboard ;;
+            *) echo "Unsupported app target" >&2; exit 2 ;;
+          esac
+          case "$REQUESTED_ACTION" in
+            status|start|stop) ;;
+            *) echo "Unsupported lifecycle action" >&2; exit 2 ;;
+          esac
+          echo "app_name=$app_name" >> "$GITHUB_OUTPUT"
+      - name: Check required GitHub Environment variables
+        run: |
+          set -euo pipefail
+          for name in DATABRICKS_HOST DATABRICKS_CLIENT_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing required GitHub Environment variable for $name"
+              exit 1
+            fi
+          done
+      - uses: databricks/setup-cli@v1.10.0
+      - name: Inspect, start, or stop app
+        env:
+          APP_NAME: ${{ steps.target.outputs.app_name }}
+        run: |
+          set -euo pipefail
+          case "$REQUESTED_ACTION" in
+            status)
+              databricks apps get "$APP_NAME" --output json | jq '{name: .name, state: .app_status.state, url: .url}'
+              ;;
+            start)
+              databricks apps start "$APP_NAME" --timeout 20m
+              databricks apps get "$APP_NAME" --output json | jq '{name: .name, state: .app_status.state, url: .url}'
+              ;;
+            stop)
+              databricks apps stop "$APP_NAME" --timeout 20m
+              databricks apps get "$APP_NAME" --output json | jq '{name: .name, state: .app_status.state, url: .url}'
+              ;;
+            *)
+              echo "Unsupported lifecycle action" >&2
+              exit 2
+              ;;
+          esac

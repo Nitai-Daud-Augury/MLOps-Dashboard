@@ -1,0 +1,28 @@
+.env
+.env.*
+.git
+.github
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.tox
+.venv
+venv
+node_modules
+dist
+coverage
+htmlcov
+*.py[cod]
+__pycache__
+backend/**/__pycache__
+backend/tests
+backend/load_tests
+*.sqlite
+*.sqlite3
+*.db
+ulrpm_backfill_dashboard_state.json
+ulrpm_backfill_admin_actions.json
+ulrpm_backfill_workflow_reviews.json
+ulrpm_backfill_control.json
+MLOps research
+Augury repos
