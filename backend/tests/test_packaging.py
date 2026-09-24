@@ -27,6 +27,10 @@ def test_databricks_app_manifest_uses_safe_same_origin_runtime():
     assert environment["BACKFILL_PRODUCTION_MODE"]["value"] == "0"
     assert environment["ULRPM_MACHINE_IDS_FILE"]["value"] == "data/unique_machine_ids.txt"
     assert environment["MONGODB_URL"]["valueFrom"] == "mongodb_url"
+    assert environment["FST_PROD_ACCOUNT_NAME"]["value"] == "auguryprodfsthns"
+    assert environment["FST_PROD_CONTAINER"]["value"] == "feature-store-container"
+    assert environment["FST_PROD_ACCOUNT_KEY"]["valueFrom"] == "fst_account_key"
+    assert "value" not in environment["FST_PROD_ACCOUNT_KEY"]
     assert all(("value" in item) != ("valueFrom" in item) for item in manifest["env"])
     values = [entry.get("value", "") for entry in environment.values()]
     assert not any(re.search(r"https?://|[0-9a-f]{24}", value, re.I) for value in values)
@@ -46,11 +50,18 @@ def test_databricks_bundle_names_sources_targets_and_secret_binding_are_safe():
     assert app["description"] == "MLOps Dashboard"
     assert app["source_code_path"] == ".."
     assert app["lifecycle"]["started"] is False
-    assert app["resources"] == [{"name": "mongodb_url", "secret": {
-        "scope": "${var.mongodb_secret_scope}",
-        "key": "${var.mongodb_secret_key}",
-        "permission": "READ",
-    }}]
+    assert app["resources"] == [
+        {"name": "mongodb_url", "secret": {
+            "scope": "${var.mongodb_secret_scope}",
+            "key": "${var.mongodb_secret_key}",
+            "permission": "READ",
+        }},
+        {"name": "fst_account_key", "secret": {
+            "scope": "${var.mongodb_secret_scope}",
+            "key": "fst_prod_account_key",
+            "permission": "READ",
+        }},
+    ]
     assert {"mongodb_secret_scope", "mongodb_secret_key"} <= set(bundle["variables"])
     serialized = (DASHBOARD_ROOT / "databricks.yml").read_text(encoding="utf-8") + (DASHBOARD_ROOT / "resources" / "mlops_dashboard.app.yml").read_text(encoding="utf-8")
     assert not re.search(r"https?://|/Users/(?!\$\{workspace\.current_user\.userName\})[^\s/]+/|[0-9a-f]{24}|password\s*:\s*\S+|token\s*:\s*\S+", serialized, re.I)
