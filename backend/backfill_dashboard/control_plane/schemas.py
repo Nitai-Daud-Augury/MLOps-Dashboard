@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from ..config import require_campaign_namespace
 
 
 class SelectionFilter(BaseModel):
@@ -39,6 +41,12 @@ class CampaignSubmitRequest(BaseModel):
     production: bool = False
     confirmation_text: str = ""
     ulrpm_confirmation_text: str = ""
+    namespace: str = Field(min_length=1, max_length=128)
+
+    @field_validator("namespace")
+    @classmethod
+    def namespace_is_allowlisted(cls, value: str) -> str:
+        return require_campaign_namespace(value)
 
 
 class CampaignActionRequest(BaseModel):

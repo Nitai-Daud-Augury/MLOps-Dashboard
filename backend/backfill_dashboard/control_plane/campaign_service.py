@@ -5,11 +5,16 @@ from datetime import timedelta
 from uuid import uuid4
 
 from ..campaigns import plan_machine_windows
+from ..config import PROD_CONFIRMATION, PROD_NAMESPACE, require_campaign_namespace
 from .campaign_repository import CampaignRepository
 from .capacity_service import PROFILES, CapacityService
 from .estimate_service import config_digest
 from .selection import iter_selection
 from .signatures import EstimateSigner
+
+
+class ProductionConfirmationRequired(Exception):
+    """Prod FST namespace was requested without the existing typed confirmation."""
 
 
 class CampaignService:
@@ -19,7 +24,9 @@ class CampaignService:
         self.readiness = readiness
 
     def submit(self, estimate_id: str, signature: str, *, name: str, created_by: str,
-               production: bool, confirmation_text: str, ulrpm_confirmation_text: str) -> dict:
+               production: bool, confirmation_text: str, ulrpm_confirmation_text: str,
+               namespace: str) -> dict:
+        namespace = require_campaign_namespace(namespace)
         estimate = self.repository.estimate(estimate_id)
         if not estimate or signature != estimate.get("estimate_signature"):
             raise ValueError("estimate signature does not match")
@@ -32,10 +39,14 @@ class CampaignService:
             raise ValueError("inventory changed; request a new estimate")
         if estimate["capacity_digest"] != self.capacity.snapshot()["digest"]:
             raise ValueError("capacity changed; request a new estimate")
+        if namespace == PROD_NAMESPACE and (not production or confirmation_text != PROD_CONFIRMATION):
+            raise ProductionConfirmationRequired(
+                f"Production namespace {PROD_NAMESPACE} requires production=true and confirmation text: {PROD_CONFIRMATION}"
+            )
         readiness = self.readiness() if production else {"production_ready": True, "blockers": []}
         if production and not readiness["production_ready"]:
             raise ValueError("production readiness failed: " + "; ".join(readiness["blockers"]))
-        if production and (not estimate["production_ready"] or confirmation_text != "RUN_PROD_BACKFILL"):
+        if production and (not estimate["production_ready"] or confirmation_text != PROD_CONFIRMATION):
             raise ValueError("production submission is not verified or confirmation text is incorrect")
         if production and estimate["lanes"]["ulrpm"]["machine_count"] and ulrpm_confirmation_text != "APPROVE_ULRPM_ON_DEMAND":
             raise ValueError("ULRPM on-demand submission requires separate confirmation")
@@ -48,7 +59,8 @@ class CampaignService:
                     "cohort_counts": {key: value["machine_count"] for key, value in estimate["lanes"].items()},
                     "date_start": request["start_at"], "date_end": request["end_at"],
                     "feature_version": request["feature_set_version"], "config_digest": config_digest(request),
-                    "estimate_id": estimate_id, "estimate_signature": signature, "production": production}
+                    "estimate_id": estimate_id, "estimate_signature": signature, "production": production,
+                    "namespace": namespace}
         self.repository.create(campaign)
         try:
             count = self._plan(campaign, request)

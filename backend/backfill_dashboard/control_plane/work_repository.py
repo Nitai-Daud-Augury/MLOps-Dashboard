@@ -18,7 +18,7 @@ class WorkRepositoryMixin:
             db.execute("BEGIN IMMEDIATE")
             db.execute("UPDATE work_items SET state='ready',lease_owner=NULL,lease_expires_at=NULL WHERE state='leased' AND lease_expires_at<? AND workflow_name IS NULL", (current,))
             rows = db.execute(
-                "SELECT w.* FROM work_items w JOIN campaigns c ON c.id=w.campaign_id WHERE w.cohort=? AND w.state IN ('ready','retry_wait') AND (w.next_attempt_at IS NULL OR w.next_attempt_at<=?) AND c.state IN ('queued','running') AND NOT EXISTS (SELECT 1 FROM machine_controls mc WHERE mc.campaign_id=w.campaign_id AND mc.machine_id=w.machine_id AND mc.state IN ('paused','cancelled')) AND NOT EXISTS (SELECT 1 FROM work_items a WHERE a.machine_id=w.machine_id AND a.state IN ('leased','submitted','running')) ORDER BY c.created_at,w.sequence_number LIMIT ?", (cohort, current, limit)).fetchall()
+                "SELECT w.*, c.namespace AS namespace FROM work_items w JOIN campaigns c ON c.id=w.campaign_id WHERE w.cohort=? AND w.state IN ('ready','retry_wait') AND (w.next_attempt_at IS NULL OR w.next_attempt_at<=?) AND c.state IN ('queued','running') AND NOT EXISTS (SELECT 1 FROM machine_controls mc WHERE mc.campaign_id=w.campaign_id AND mc.machine_id=w.machine_id AND mc.state IN ('paused','cancelled')) AND NOT EXISTS (SELECT 1 FROM work_items a WHERE a.machine_id=w.machine_id AND a.state IN ('leased','submitted','running')) ORDER BY c.created_at,w.sequence_number LIMIT ?", (cohort, current, limit)).fetchall()
             for row in rows:
                 db.execute("UPDATE work_items SET state='leased',lease_owner=?,lease_expires_at=? WHERE idempotency_key=?", (owner, expiry, row["idempotency_key"]))
             ids = {row["campaign_id"] for row in rows}

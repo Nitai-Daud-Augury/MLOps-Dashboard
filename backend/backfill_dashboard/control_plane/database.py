@@ -17,6 +17,9 @@ class Database:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(campaigns)")}
             if "production" not in columns:
                 connection.execute("ALTER TABLE campaigns ADD COLUMN production INTEGER NOT NULL DEFAULT 0")
+            if "namespace" not in columns:
+                # Empty, not production: historical rows must not start targeting prod.
+                connection.execute("ALTER TABLE campaigns ADD COLUMN namespace TEXT NOT NULL DEFAULT ''")
             inventory_columns = {row[1] for row in connection.execute("PRAGMA table_info(inventory)")}
             if "last_recorded_at" not in inventory_columns:
                 connection.execute("ALTER TABLE inventory ADD COLUMN last_recorded_at TEXT")

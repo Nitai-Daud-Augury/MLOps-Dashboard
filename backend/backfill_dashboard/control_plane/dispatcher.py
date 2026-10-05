@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import socket
 
+from ..config import require_campaign_namespace
 from .campaign_repository import CampaignRepository
 from .capacity_service import CapacityService
 from .safety_policy import evaluate_campaign
@@ -24,6 +25,7 @@ class Dispatcher:
                     current = self.inventory.get_many([item["machine_id"]])
                     if len(current) != 1 or current[0].resource_cohort != cohort or current[0].classification_source_version != item["classifier_version"]:
                         raise ClassificationMismatch("machine classification changed before dispatch")
+                    require_campaign_namespace(item.get("namespace"))
                     identity = self.adapter.submit(item)
                     price = self.pricing.get_rate(profile["region"], profile["sku"], profile["purchase"]) if profile["region"] and profile["sku"] else None
                     self.repository.submitted(item, identity.workflow_name, identity.run_id, profile, price)

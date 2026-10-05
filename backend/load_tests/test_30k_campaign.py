@@ -9,6 +9,7 @@ from types import SimpleNamespace
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
+from backfill_dashboard.config import DEFAULT_DEV_NAMESPACE
 from backfill_dashboard.control_plane import ControlPlane
 from backfill_dashboard.inventory_models import MachinePage, MachineSearchQuery
 from backfill_dashboard.inventory_provider import _record, decode_cursor, encode_cursor
@@ -36,6 +37,7 @@ def test_plan_30k_machines_and_780k_windows(tmp_path, monkeypatch):
         "start_at": "2024-01-01", "end_at": "2026-02-01", "feature_set_version": "load-v1",
         "standard_window_days": 30, "ulrpm_window_days": 5})
     campaign = plane.campaign_service.submit(estimate["estimate_id"], estimate["estimate_signature"],
-        name="30k load gate", created_by="test", production=False, confirmation_text="", ulrpm_confirmation_text="")
+        name="30k load gate", created_by="test", production=False, confirmation_text="", ulrpm_confirmation_text="",
+        namespace=DEFAULT_DEV_NAMESPACE)
     assert campaign["work_item_counts"] == {"blocked": 750_000, "ready": 30_000}
     assert time.monotonic() - started < 60

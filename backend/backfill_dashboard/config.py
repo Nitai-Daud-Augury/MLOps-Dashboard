@@ -9,6 +9,11 @@ from dotenv import load_dotenv
 from .months import orchestrator_months
 
 
+# Shared with the legacy admin trigger path (admin.py re-exports these names).
+PROD_NAMESPACE = "feature-store-container"
+PROD_CONFIRMATION = "RUN_PROD_BACKFILL"
+DEFAULT_DEV_NAMESPACE = "ulrpm-fst-dev-20260830"
+
 EXPECTED_ULTRASONIC_V2_COLUMNS = [
     "ultrasonic_p2p_v2",
     "ultrasonic_rms_v2",
@@ -80,6 +85,7 @@ class Settings:
     estimate_ttl_seconds: int = int(os.getenv("BACKFILL_ESTIMATE_TTL_SECONDS", "900"))
     scan_idle_timeout_seconds: int = int(os.getenv("BACKFILL_SCAN_IDLE_TIMEOUT_SECONDS", "600"))
     scan_heartbeat_interval_seconds: int = int(os.getenv("BACKFILL_SCAN_HEARTBEAT_SECONDS", "30"))
+    campaign_namespace_allowlist: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -88,7 +94,29 @@ class Settings:
             _csv_env("BACKFILL_TARGET_FEATURES", EXPECTED_ULTRASONIC_V2_COLUMNS),
         )
         object.__setattr__(self, "target_months", orchestrator_months())
+        object.__setattr__(
+            self,
+            "campaign_namespace_allowlist",
+            _csv_env(
+                "BACKFILL_CAMPAIGN_NAMESPACE_ALLOWLIST",
+                [DEFAULT_DEV_NAMESPACE, PROD_NAMESPACE],
+            ),
+        )
 
 
 def get_settings() -> Settings:
     return Settings()
+
+
+def require_campaign_namespace(namespace: str | None) -> str:
+    """Return an allowlisted FST namespace. Missing values do not fall back to prod."""
+    value = (namespace or "").strip()
+    if not value:
+        raise ValueError("namespace is required; campaign dispatch does not default to production")
+    allowed = get_settings().campaign_namespace_allowlist
+    if value not in allowed:
+        allowed_text = ", ".join(allowed) or "(none)"
+        raise ValueError(
+            f"namespace {value!r} is not in BACKFILL_CAMPAIGN_NAMESPACE_ALLOWLIST ({allowed_text})"
+        )
+    return value
