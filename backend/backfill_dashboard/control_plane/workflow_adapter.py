@@ -5,6 +5,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+from ..config import require_campaign_namespace
 from ..manifests import BackfillManifestWriter, MachineManifestRequest
 
 
@@ -20,6 +21,7 @@ class ArgoWorkflowAdapter:
         self.namespace = os.getenv("BACKFILL_ARGO_NAMESPACE", "jobs-default")
 
     def submit(self, item: dict) -> WorkflowIdentity:
+        fst_namespace = require_campaign_namespace(item.get("namespace"))
         expected = {"standard": "standard-8g-v1", "ulrpm": "ulrpm-64g-v1"}
         if item["cohort"] not in expected or item["resource_profile_version"] != expected[item["cohort"]]:
             raise ValueError("cohort/resource profile routing mismatch")
@@ -30,7 +32,7 @@ class ArgoWorkflowAdapter:
             machine_id=item["machine_id"], since=item["window_start"], until=item["window_end"]))
         name = self.external_name(item)
         command = ["argo", "submit", "-n", self.namespace, "--name", name, "--from", f"workflowtemplate/{template}",
-                   "-l", f"backfill-campaign={item['campaign_id']}", "-p", "name-space=\"feature-store-container\"",
+                   "-l", f"backfill-campaign={item['campaign_id']}", "-p", f"name-space=\"{fst_namespace}\"",
                    "-p", f"storage_account_manifest_path={json.dumps(manifest.manifest_path)}",
                    "-p", "manifest_bucket_count=1", "-p", "features_to_backfill=\"\"", "-o", "json"]
         result = subprocess.run(command, capture_output=True, text=True, timeout=45, check=True)

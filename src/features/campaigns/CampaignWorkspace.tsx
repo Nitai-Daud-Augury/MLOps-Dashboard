@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { AlertTriangle, Calculator } from 'lucide-react';
+import { DEFAULT_DEV_NAMESPACE, PROD_CONTAINER } from '../../constants';
 import { requestEstimate, submitCampaign } from './api';
 import { CampaignConfiguration, type CampaignConfig } from './CampaignConfiguration';
 import { EstimateReview } from './EstimateReview';
@@ -13,7 +14,7 @@ import type { Campaign, Estimate, InventoryFilters } from './types';
 const initialFilters: InventoryFilters = { search: '', cohort: '', status: '', eligible: 'true', site_id: '', organization_id: '', classification_issue: '', sort_by: 'machine_id', sort_dir: 'asc' };
 const isoDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const today = new Date(); const nextMonth = new Date(today); nextMonth.setDate(nextMonth.getDate() + 30);
-const initialConfig: CampaignConfig = { name: '', startAt: isoDay(today), endAt: isoDay(nextMonth), featureVersion: 'current', standardWindowDays: 30, ulrpmWindowDays: 5, production: false, confirmation: '', ulrpmConfirmation: '' };
+const initialConfig: CampaignConfig = { name: '', startAt: isoDay(today), endAt: isoDay(nextMonth), featureVersion: 'current', standardWindowDays: 30, ulrpmWindowDays: 5, production: false, confirmation: '', ulrpmConfirmation: '', namespace: DEFAULT_DEV_NAMESPACE };
 
 export function CampaignWorkspace({ workflowMutationsEnabled = false }: { workflowMutationsEnabled?: boolean }) {
   const [filters, setFilters] = useState(initialFilters); const [cursor, setCursor] = useState<string | null>(null);
@@ -26,7 +27,7 @@ export function CampaignWorkspace({ workflowMutationsEnabled = false }: { workfl
   const changeFilters = (value: InventoryFilters) => { setFilters(value); setCursor(null); setHistory([]); setSelected(new Set()); setSelectAll(false); reset(); };
   const toggle = (id: string) => { const next = new Set(selected); next.has(id) ? next.delete(id) : next.add(id); setSelected(next); reset(); };
   const estimateRun = async () => { setBusy(true); try { setEstimate(await requestEstimate({ selection, start_at: config.startAt, end_at: config.endAt, feature_set_version: config.featureVersion, standard_window_days: config.standardWindowDays, ulrpm_window_days: config.ulrpmWindowDays })); setError(''); } catch (value) { setError(value instanceof Error ? value.message : String(value)); } finally { setBusy(false); } };
-  const submit = async () => { if (!estimate || !workflowMutationsEnabled) return; setBusy(true); try { setCampaign(await submitCampaign({ estimate_id: estimate.estimate_id, estimate_signature: estimate.estimate_signature, name: config.name, production: config.production, confirmation_text: config.confirmation, ulrpm_confirmation_text: config.ulrpmConfirmation })); setError(''); } catch (value) { setError(value instanceof Error ? value.message : String(value)); } finally { setBusy(false); } };
+  const submit = async () => { if (!estimate || !workflowMutationsEnabled) return; setBusy(true); try { setCampaign(await submitCampaign({ estimate_id: estimate.estimate_id, estimate_signature: estimate.estimate_signature, name: config.name, production: config.production, confirmation_text: config.confirmation, ulrpm_confirmation_text: config.ulrpmConfirmation, namespace: config.production ? PROD_CONTAINER : config.namespace })); setError(''); } catch (value) { setError(value instanceof Error ? value.message : String(value)); } finally { setBusy(false); } };
   return <section className="panel inventory-panel campaign-workspace"><div className="panel-header"><div><p className="eyebrow">All-machine control plane</p><h2>Build a backfill campaign</h2><p>Paginated inventory, isolated resource lanes, bounded durable dispatch.</p></div></div>
     <ReadinessBanner />
     <section className="campaign-stage"><div className="stage-title"><span>1</span><div><h3>Select machines</h3><p>Unknown or ineligible machines stay visible but cannot be selected.</p></div></div><InventoryFiltersBar filters={filters} onChange={changeFilters} />

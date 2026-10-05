@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from backfill_dashboard.config import DEFAULT_DEV_NAMESPACE
 from backfill_dashboard.control_plane import ControlPlane
 from backfill_dashboard.inventory_models import MachinePage, MachineSearchQuery
 from backfill_dashboard.inventory_provider import _record, decode_cursor, encode_cursor
@@ -75,7 +76,8 @@ def test_inventory_snapshot_estimate_and_campaign_are_durable(tmp_path, monkeypa
     assert estimate["lanes"]["ulrpm"]["machine_count"] == 1
     assert estimate["excluded_unknown_or_ineligible"] == 1
     campaign = plane.campaign_service.submit(estimate["estimate_id"], estimate["estimate_signature"],
-        name="safe campaign", created_by="tester", production=False, confirmation_text="", ulrpm_confirmation_text="")
+        name="safe campaign", created_by="tester", production=False, confirmation_text="", ulrpm_confirmation_text="",
+        namespace=DEFAULT_DEV_NAMESPACE)
     assert campaign["work_item_counts"] == {"blocked": 2, "ready": 2}
     reopened = build_plane(tmp_path, monkeypatch)
     assert reopened.campaigns.get(campaign["id"])["work_item_counts"] == campaign["work_item_counts"]
@@ -98,7 +100,8 @@ def test_signed_estimate_rejects_changed_inventory(tmp_path, monkeypatch):
     plane.database.set_metadata("inventory_version", "v2")
     try:
         plane.campaign_service.submit(estimate["estimate_id"], estimate["estimate_signature"], name="", created_by="x",
-                                      production=False, confirmation_text="", ulrpm_confirmation_text="")
+                                      production=False, confirmation_text="", ulrpm_confirmation_text="",
+                                      namespace=DEFAULT_DEV_NAMESPACE)
     except ValueError as exc:
         assert "inventory changed" in str(exc)
     else:
@@ -113,7 +116,8 @@ def test_dispatcher_routes_only_matching_profile(tmp_path, monkeypatch):
         "start_at": "2026-01-01", "end_at": "2026-01-03", "feature_set_version": "v1",
         "standard_window_days": 1, "ulrpm_window_days": 1})
     plane.campaign_service.submit(estimate["estimate_id"], estimate["estimate_signature"], name="route",
-        created_by="test", production=False, confirmation_text="", ulrpm_confirmation_text="")
+        created_by="test", production=False, confirmation_text="", ulrpm_confirmation_text="",
+        namespace=DEFAULT_DEV_NAMESPACE)
     submitted = []
     class Adapter:
         def submit(self, item):
@@ -136,7 +140,7 @@ def test_production_submission_is_blocked_by_global_readiness(tmp_path, monkeypa
     try:
         plane.campaign_service.submit(estimate["estimate_id"], estimate["estimate_signature"], name="unsafe",
             created_by="test", production=True, confirmation_text="RUN_PROD_BACKFILL",
-            ulrpm_confirmation_text="")
+            ulrpm_confirmation_text="", namespace=DEFAULT_DEV_NAMESPACE)
     except ValueError as exc:
         assert "production readiness failed" in str(exc)
     else:
@@ -152,7 +156,8 @@ def test_repeated_failures_auto_pause_campaign(tmp_path, monkeypatch):
         "start_at": "2026-01-01", "end_at": "2026-01-03", "feature_set_version": "v1",
         "standard_window_days": 1, "ulrpm_window_days": 1})
     campaign = plane.campaign_service.submit(estimate["estimate_id"], estimate["estimate_signature"], name="pause",
-        created_by="test", production=False, confirmation_text="", ulrpm_confirmation_text="")
+        created_by="test", production=False, confirmation_text="", ulrpm_confirmation_text="",
+        namespace=DEFAULT_DEV_NAMESPACE)
     with plane.database.connect() as db:
         db.execute("UPDATE campaigns SET state='running' WHERE id=?", (campaign["id"],))
         db.execute("UPDATE work_items SET state='failed' WHERE campaign_id=?", (campaign["id"],))
@@ -168,7 +173,8 @@ def test_machine_pause_and_resume_controls_dispatch(tmp_path, monkeypatch):
         "start_at": "2026-01-01", "end_at": "2026-01-03", "feature_set_version": "v1",
         "standard_window_days": 1, "ulrpm_window_days": 1})
     campaign = plane.campaign_service.submit(estimate["estimate_id"], estimate["estimate_signature"], name="machine",
-        created_by="test", production=False, confirmation_text="", ulrpm_confirmation_text="")
+        created_by="test", production=False, confirmation_text="", ulrpm_confirmation_text="",
+        namespace=DEFAULT_DEV_NAMESPACE)
     apply_machine_action(plane.campaigns, campaign["id"], "machine-standard", "pause", "test", "investigate")
     assert plane.campaigns.lease("standard", 10, "worker") == []
     apply_machine_action(plane.campaigns, campaign["id"], "machine-standard", "resume", "test", "resolved")

@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from .config import EXPECTED_ULTRASONIC_V2_COLUMNS
+from .config import (
+    DEFAULT_DEV_NAMESPACE,
+    EXPECTED_ULTRASONIC_V2_COLUMNS,
+    PROD_CONFIRMATION,
+    PROD_NAMESPACE,
+)
 
 
 SourceType = Literal["local", "github"]
@@ -25,10 +30,7 @@ EnvironmentTarget = Literal["dev", "prod"]
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_METAFLOW_DIR = WORKSPACE_ROOT / "Augury repos" / "metaflow-bx"
 DEFAULT_FLOW_PATH = DEFAULT_METAFLOW_DIR / "FSTBackfill_prod_flow.py"
-PROD_NAMESPACE = "feature-store-container"
-PROD_CONFIRMATION = "RUN_PROD_BACKFILL"
 STOP_PROD_CONFIRMATION = "STOP_PROD_BACKFILL"
-DEFAULT_DEV_NAMESPACE = "ulrpm-fst-dev-20260830"
 ARGO_NAMESPACE = os.getenv("BACKFILL_ARGO_NAMESPACE", "jobs-default")
 DEFAULT_FST_BACKFILL_TEMPLATE = os.getenv(
     "BACKFILL_FST_WORKFLOW_TEMPLATE",

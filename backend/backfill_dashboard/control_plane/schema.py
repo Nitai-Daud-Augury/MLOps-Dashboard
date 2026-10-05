@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
  cohort_counts TEXT NOT NULL, date_start TEXT NOT NULL, date_end TEXT NOT NULL,
  feature_version TEXT NOT NULL, config_digest TEXT NOT NULL, estimate_id TEXT NOT NULL,
  estimate_signature TEXT NOT NULL, production INTEGER NOT NULL DEFAULT 0,
+ namespace TEXT NOT NULL DEFAULT '',
  submitted_at TEXT, paused_at TEXT, completed_at TEXT,
  FOREIGN KEY(estimate_id) REFERENCES estimates(id));
 CREATE TABLE IF NOT EXISTS work_items (

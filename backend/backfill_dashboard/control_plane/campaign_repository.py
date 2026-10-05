@@ -26,12 +26,12 @@ class CampaignRepository(WorkRepositoryMixin):
 
     def create(self, campaign: dict) -> None:
         with self.database.connect() as db:
-            db.execute("INSERT INTO campaigns(id,name,created_by,created_at,state,inventory_version,selection_snapshot,cohort_counts,date_start,date_end,feature_version,config_digest,estimate_id,estimate_signature,production,submitted_at,paused_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            db.execute("INSERT INTO campaigns(id,name,created_by,created_at,state,inventory_version,selection_snapshot,cohort_counts,date_start,date_end,feature_version,config_digest,estimate_id,estimate_signature,production,namespace,submitted_at,paused_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                 campaign["id"], campaign["name"], campaign["created_by"], campaign["created_at"], "draft",
                 campaign["inventory_version"], json.dumps(campaign["selection_snapshot"], sort_keys=True),
                 json.dumps(campaign["cohort_counts"], sort_keys=True), campaign["date_start"], campaign["date_end"],
                 campaign["feature_version"], campaign["config_digest"], campaign["estimate_id"], campaign["estimate_signature"],
-                int(campaign.get("production", False)), campaign["created_at"], None, None))
+                int(campaign.get("production", False)), campaign["namespace"], campaign["created_at"], None, None))
         self.event(campaign["id"], "campaign_planning", {"cohort_counts": campaign["cohort_counts"]})
 
     def finish_planning(self, campaign_id: str, count: int) -> None:

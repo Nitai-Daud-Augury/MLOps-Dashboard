@@ -6,6 +6,7 @@ import json
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
+from .campaign_service import ProductionConfirmationRequired
 from .limiter import limiter
 from .machine_control import apply_machine_action
 from .schemas import CampaignActionRequest, CampaignSubmitRequest, EstimateRequest, MachineActionRequest, WorkItemActionRequest
@@ -33,7 +34,9 @@ def campaign_router(control_plane) -> APIRouter:
             return control_plane.campaign_service.submit(
                 request.estimate_id, request.estimate_signature, name=request.name, created_by=actor,
                 production=request.production, confirmation_text=request.confirmation_text,
-                ulrpm_confirmation_text=request.ulrpm_confirmation_text)
+                ulrpm_confirmation_text=request.ulrpm_confirmation_text, namespace=request.namespace)
+        except ProductionConfirmationRequired as exc:
+            raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
