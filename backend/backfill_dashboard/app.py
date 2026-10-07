@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import asyncio
 import os
 import time
+from time import monotonic
 from uuid import uuid4
 from pydantic import BaseModel, Field
 
@@ -36,6 +37,7 @@ from .manifests import (
     validate_machine_ids,
     validate_timestamp,
 )
+from .windows import ManifestWindow, SplitSpec, windows_for_selection
 from .activity import effective_activity_status, is_month_backfillable
 from .months import month_for_index
 from .storage import AzureBlobStore
@@ -57,7 +59,7 @@ from .control_plane.selection import iter_selection
 from .schemas import (
     AllMachinesBackfillRequest, CancelMonthRequest, CreateWorkflowRequest,
     FullRlblTestRequestModel, LogsRequest, MachineManifestRequestModel, MonthPlanRequest,
-    MultiMachineManifestRequestModel, OrchestratedBackfillRequest, OrchestratedManifestRequest,
+    DailyGapManifestRequestModel, MultiMachineManifestRequestModel, OrchestratedBackfillRequest, OrchestratedManifestRequest,
     ScanRequest, TerminateParamsModel,
     TerminateWorkflowRequest, TriggerParamsModel, TriggerWorkflowRequest,
     WorkflowSourceModel,
@@ -65,6 +67,7 @@ from .schemas import (
 
 
 RUNTIME_INFO = runtime_info()
+BACKFILL_CANCEL_WINDOW_SECONDS = 15
 app = FastAPI(title="MLOps Dashboard")
 if local_vite_development_enabled():
     app.add_middleware(
@@ -99,9 +102,10 @@ def _workflow_mutation_route(method: str, path: str) -> bool:
     if path in fixed:
         return True
     return (
-        path.startswith("/api/machines/") and path.endswith("/cancel")
-        or path.startswith("/api/v1/backfill-campaigns/")
-        and (path.endswith("/actions") or "/items/" in path and "/actions" in path)
+        (path.startswith("/api/admin/actions/") and path.endswith("/cancel-before-submit"))
+        or (path.startswith("/api/machines/") and path.endswith("/cancel"))
+        or (path.startswith("/api/v1/backfill-campaigns/")
+            and (path.endswith("/actions") or "/items/" in path and "/actions" in path))
     )
 
 
@@ -125,8 +129,32 @@ async def enforce_runtime_capabilities(request: Request, call_next):
     return await call_next(request)
 
 
+class _QuietAdminActionAccessFilter:
+    """Drop INFO access lines for the hot GET /api/admin/actions/{id} poll path."""
+
+    def filter(self, record) -> bool:  # noqa: A003 - logging.Filter API
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        # Uvicorn access: '... "GET /api/admin/actions/<id> HTTP/1.1" 200'
+        if '"GET /api/admin/actions/' not in message:
+            return True
+        if '/cancel-before-submit' in message:
+            return True
+        # Keep non-success lines so failures still surface.
+        if '" 200' not in message and '" 304' not in message:
+            return True
+        return False
+
+
 @app.on_event("startup")
 def start_control_plane() -> None:
+    import logging
+
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, _QuietAdminActionAccessFilter) for item in access_logger.filters):
+        access_logger.addFilter(_QuietAdminActionAccessFilter())
     control_plane.runtime.start()
 
 
@@ -697,6 +725,16 @@ def get_admin_action(action_id: str) -> dict:
     return {"action": action}
 
 
+@app.post("/api/admin/actions/{action_id}/cancel-before-submit")
+def cancel_backfill_before_submit(action_id: str) -> dict:
+    try:
+        return {"action": admin_repository.cancel_pending_trigger(action_id)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Admin action not found: {action_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/api/admin/workflows/create")
 def create_workflow(request: CreateWorkflowRequest, background_tasks: BackgroundTasks) -> dict:
     source = WorkflowSourceRequest(**request.source.model_dump())
@@ -751,17 +789,28 @@ def create_multi_machine_manifest(request: MultiMachineManifestRequestModel) -> 
 def create_orchestrated_manifests(request: OrchestratedManifestRequest) -> dict:
     """Upload the monthly manifests consumed by the ULRPM parent without triggering it."""
     try:
-        selected_indices = _selected_month_indices(
-            request.machine_ids, request.since, request.until, request.month_indices_by_machine
+        windows_by_machine = _resolve_windows(
+            request.machine_ids,
+            request.since,
+            request.until,
+            request.month_indices_by_machine or None,
+            request.split.model_dump(),
         )
+        selected_indices = {
+            machine_id: sorted({window.month_index for window in windows})
+            for machine_id, windows in windows_by_machine.items()
+        }
         _reject_non_online_months(selected_indices)
+        _require_split_supported(request.split.model_dump())
         manifest = manifest_writer.write_orchestrated_monthly_manifests(
             machine_ids=request.machine_ids,
             since=request.since,
             until=request.until,
             manifest_prefix=request.manifest_prefix,
-            month_indices_by_machine=selected_indices,
+            month_indices_by_machine=request.month_indices_by_machine or None,
+            split=request.split.model_dump(),
         )
+        _assert_windows_sequential(manifest.windows_by_machine)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     action = admin_repository.record_completed(
@@ -779,6 +828,31 @@ def create_orchestrated_manifests(request: OrchestratedManifestRequest) -> dict:
         "machine_count": len(manifest.machine_ids),
         "month_count": manifest.month_count,
     }
+
+
+@app.post("/api/admin/manifests/daily-gaps")
+def create_daily_gap_manifests(request: DailyGapManifestRequestModel) -> dict:
+    """Create one create-only Parquet manifest per completed UTC day in selected gap months."""
+    try:
+        if not request.month_indices:
+            raise ValueError("Select at least one gap month")
+        _reject_selected_gap_months(request.machine_id, request.month_indices)
+        manifest = manifest_writer.write_daily_gap_manifests(
+            machine_id=request.machine_id,
+            month_indices=request.month_indices,
+            manifest_prefix=request.manifest_prefix,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    action = admin_repository.record_completed(
+        action="manifest",
+        command=["upload-daily-gap-manifests", manifest.manifest_prefix],
+        cwd=DEFAULT_FLOW_PATH.parent,
+        stdout=manifest_stdout(manifest),
+        outerbounds_url=OUTERBOUNDS_RUNS_URL,
+        machine_ids=[manifest.machine_id],
+    )
+    return {"manifest": asdict(manifest), "action": asdict(action)}
 
 
 @app.post("/api/admin/workflows/trigger")
@@ -815,7 +889,8 @@ def trigger_all_inventory_backfill(
         action = admin_repository.create(
             action="trigger", command=[], cwd=DEFAULT_FLOW_PATH.parent,
             outerbounds_url=OUTERBOUNDS_RUNS_URL, machine_ids=[],
-            flow_name="UlrpmDevBackfillOrchestratorFlow", phase="queued",
+            flow_name="UlrpmDevBackfillOrchestratorFlow", phase="cancel_window",
+            cancel_window_until=(datetime.now(timezone.utc) + timedelta(seconds=BACKFILL_CANCEL_WINDOW_SECONDS)).isoformat(),
             exclusive_trigger_submission=True,
         )
     except Exception as exc:
@@ -835,15 +910,21 @@ def trigger_orchestrated_machine_backfill(
         machine_ids = validate_machine_ids(request.machine_ids)
         if params.max_parallel_steps > len(machine_ids):
             raise ValueError(f"Machine lane concurrency cannot exceed selected machine count ({len(machine_ids)})")
-        selected_indices = _selected_month_indices(
-            machine_ids, request.since, request.until, request.month_indices_by_machine
+        windows_by_machine = _resolve_windows(
+            machine_ids, request.since, request.until, request.month_indices_by_machine or None, request.split.model_dump()
         )
+        selected_indices = {
+            machine_id: sorted({window.month_index for window in windows})
+            for machine_id, windows in windows_by_machine.items()
+        }
         _validate_selected_indices_for_queue(selected_indices)
+        _require_split_supported(request.split.model_dump())
         request = request.model_copy(update={"machine_ids": machine_ids})
         action = admin_repository.create(
             action="trigger", command=[], cwd=DEFAULT_FLOW_PATH.parent,
             outerbounds_url=OUTERBOUNDS_RUNS_URL, machine_ids=machine_ids,
-            flow_name="UlrpmDevBackfillOrchestratorFlow", phase="queued",
+            flow_name="UlrpmDevBackfillOrchestratorFlow", phase="cancel_window",
+            cancel_window_until=(datetime.now(timezone.utc) + timedelta(seconds=BACKFILL_CANCEL_WINDOW_SECONDS)).isoformat(),
             exclusive_trigger_submission=True,
         )
     except Exception as exc:
@@ -955,6 +1036,157 @@ def _action_status_from_workflow(status: str) -> str:
     return "running"
 
 
+
+
+def _assert_windows_sequential(windows_by_machine: dict[str, list]) -> None:
+    """Reject a plan whose per-machine windows overlap or are out of chronological order.
+
+    Gaps between different months are allowed (e.g. October then March). Within the
+    same month_index, week/day chunks must remain contiguous so in-month splits still
+    abut. Same-machine chunks still run strictly sequentially at dispatch time.
+    """
+    for machine_id, windows in windows_by_machine.items():
+        if not windows:
+            continue
+        # Support ManifestWindow objects or dict payloads.
+        def _bounds(item):
+            if hasattr(item, "since"):
+                return item.since, item.until, getattr(item, "month_index", None)
+            return item["since"], item["until"], item.get("month_index")
+
+        prev_until = None
+        prev_month_index = None
+        for item in windows:
+            since, until, month_index = _bounds(item)
+            since_s = since if isinstance(since, str) else since.strftime("%Y/%m/%d/%H")
+            until_s = until if isinstance(until, str) else until.strftime("%Y/%m/%d/%H")
+            if until_s <= since_s:
+                raise ValueError(f"Invalid window for {machine_id}: until must be after since ({since_s} -> {until_s})")
+            if prev_until is not None and since_s < prev_until:
+                raise ValueError(
+                    f"Windows for {machine_id} must be chronological and non-overlapping "
+                    f"(saw {since_s} before previous until {prev_until})"
+                )
+            # Contiguity is required only among chunks that share a month_index.
+            # Disjoint selected months (Oct → Mar) may leave a gap between segments.
+            if (
+                prev_until is not None
+                and month_index is not None
+                and prev_month_index is not None
+                and month_index == prev_month_index
+                and since_s != prev_until
+            ):
+                raise ValueError(
+                    f"Windows for {machine_id} month_index={month_index} must be contiguous "
+                    f"(gap between {prev_until} and {since_s})"
+                )
+            prev_until = until_s
+            prev_month_index = month_index
+
+
+def _active_child_workflow_ids_for_machine(machine_id: str, month_indices: list[int]) -> list[str]:
+    """Collect child FSTBackfill workflow ids still associated with this machine's months."""
+    ids: list[str] = []
+    for month_index in month_indices:
+        state = control_store.get_month_state(machine_id, month_index) or {}
+        child = str(state.get("child_workflow_id") or "").strip()
+        if child and state.get("state") in ACTIVE_MONTH_STATES | {"running", "queued", "cancel_requested", "stopping"}:
+            ids.append(child)
+    # Also scan list_machine_states for any other active child ids on this machine.
+    try:
+        for state in control_store.list_machine_states(machine_id):
+            if int(state.get("month_index", -1)) in set(month_indices):
+                continue
+            child = str(state.get("child_workflow_id") or "").strip()
+            if child and state.get("state") in ACTIVE_MONTH_STATES | {"running", "queued", "cancel_requested", "stopping"}:
+                ids.append(child)
+    except Exception:
+        pass
+    return list(dict.fromkeys(ids))
+
+
+def _wait_for_machine_children_idle(
+    machine_id: str,
+    month_indices: list[int],
+    *,
+    deadline: float,
+    child_ids: list[str] | None = None,
+) -> None:
+    """Block until known child FSTBackfill workflows for this machine are terminal (or absent).
+
+    Injectable via monkeypatching ``running_workflows.lookup_workflows``. Refuses the
+    replacement if children are still running when the deadline expires.
+    """
+    terminal = {"succeeded", "completed", "failed", "error", "terminated"}
+    pending = list(child_ids or _active_child_workflow_ids_for_machine(machine_id, month_indices))
+    if not pending:
+        # Fall back: ask the running-workflows provider for any fstbackfill workflow whose
+        # parsed machine_ids include this machine (test doubles can stub list_running).
+        try:
+            listed = running_workflows.list_running().get("workflows") or []
+            pending = [
+                str(item.get("workflow_id") or "")
+                for item in listed
+                if machine_id in (item.get("machine_ids") or [])
+                and "fstbackfill" in str(item.get("workflow_id") or item.get("flow_name") or "").lower()
+            ]
+            pending = [item for item in pending if item]
+        except Exception:
+            pending = []
+    if not pending:
+        return
+    while monotonic() < deadline:
+        live = running_workflows.lookup_workflows(pending)
+        still_running = []
+        seen = {str(item.get("workflow_id") or "") for item in live}
+        for workflow_id in pending:
+            match = next((item for item in live if str(item.get("workflow_id") or "") == workflow_id), None)
+            if match is None:
+                # Absent from Argo after parent cancelled: treat as gone.
+                continue
+            phase = str(match.get("status") or "").lower()
+            if phase not in terminal:
+                still_running.append(workflow_id)
+        if not still_running:
+            return
+        pending = still_running
+        time.sleep(5)
+    raise RuntimeError(
+        f"Refusing replacement for {machine_id}: child FSTBackfill workflow(s) still running: "
+        f"{', '.join(pending)}. Wait for them to finish (or terminate them) before requeueing."
+    )
+
+
+def _manifest_plan_from_windows(windows_by_machine: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """Shape persisted windows into the orchestrator machine_manifest_plan payload."""
+    plan: dict[str, list[dict]] = {}
+    for machine_id, windows in windows_by_machine.items():
+        plan[machine_id] = [
+            {
+                "month_index": int(item["month_index"]),
+                "manifest": item["manifest_path"],
+                "since": item["since"],
+                "until": item["until"],
+            }
+            for item in windows
+        ]
+    return plan
+
+
+def _require_split_supported(split: dict | None) -> None:
+    """Reject sub-month splits unless the deployed orchestrator template is v5."""
+    mode = (split or {}).get("mode", "month")
+    if mode == "month":
+        return
+    readiness = command_builder.ulrpm_orchestrator_readiness()
+    if not readiness.get("supports_submonth_split"):
+        deployed = readiness.get("contract_version") or readiness.get("deployed_contract") or "unknown"
+        raise ValueError(
+            f"Split by day/week/N days requires orchestrator contract v5 "
+            f"(deployed template reports {deployed}). Use Full month, or redeploy the orchestrator."
+        )
+
+
 def _orchestrated_manifest_payload(manifest) -> dict:
     return {
         "account_name": manifest.account_name,
@@ -962,8 +1194,38 @@ def _orchestrated_manifest_payload(manifest) -> dict:
         "manifest_path": manifest.manifest_template,
         "manifest_prefix": manifest.manifest_prefix,
         "rows": manifest.manifest_count,
+        "manifest_count": manifest.manifest_count,
         "blob_url": manifest.blob_url,
+        "windows": manifest.windows_by_machine,
+        "split": manifest.split,
     }
+
+
+def _resolve_windows(
+    machine_ids: list[str],
+    since: str,
+    until: str,
+    requested_indices: dict[str, list[int]] | None,
+    split: dict | SplitSpec | None = None,
+    now: datetime | None = None,
+) -> dict[str, list[ManifestWindow]]:
+    """Resolve exact UTC windows per machine before any manifest upload."""
+    validated = validate_machine_ids(machine_ids)
+    split_spec = SplitSpec.from_mapping(split).validated()
+    if requested_indices:
+        if set(requested_indices) != set(validated):
+            raise ValueError("month_indices_by_machine must contain exactly the requested machine IDs")
+    result: dict[str, list[ManifestWindow]] = {}
+    for machine_id in validated:
+        indices = None if not requested_indices else requested_indices[machine_id]
+        result[machine_id] = windows_for_selection(
+            since=since,
+            until=until,
+            month_indices=indices,
+            split=split_spec,
+            now=now,
+        )
+    return result
 
 
 def _selected_month_indices(
@@ -971,18 +1233,15 @@ def _selected_month_indices(
     since: str,
     until: str,
     requested: dict[str, list[int]],
+    split: dict | None = None,
 ) -> dict[str, list[int]]:
-    """Resolve the complete selection before any manifest upload takes place."""
-    if requested:
-        if set(requested) != set(machine_ids):
-            raise ValueError("month_indices_by_machine must contain exactly the requested machine IDs")
-        return requested
-    start = validate_timestamp(since, field_name="since")
-    end = validate_timestamp(until, field_name="until")
-    if end <= start:
-        raise ValueError("until must be after since")
-    indices = [index for index, *_ in orchestrator_month_windows(start, end)]
-    return {machine_id: indices for machine_id in machine_ids}
+    """Compatibility wrapper: month indices derived from resolved windows."""
+    windows_by_machine = _resolve_windows(machine_ids, since, until, requested or None, split)
+    return {
+        machine_id: sorted({window.month_index for window in windows})
+        for machine_id, windows in windows_by_machine.items()
+        if windows
+    }
 
 
 def _validate_trigger_params_for_queue(params: TriggerParams) -> None:
@@ -1025,7 +1284,7 @@ def _fail_trigger_preparation(
 ) -> None:
     """Record preparation failure and release any reservations owned by this action."""
     action = admin_repository.get(action_id) or {}
-    if action.get("phase") in {"accepted", "failed"}:
+    if action.get("phase") in {"accepted", "failed", "cancelled"}:
         return
     message = str(error)
     cleanup_pending = False
@@ -1046,30 +1305,51 @@ def _fail_trigger_preparation(
     admin_repository.mark_failed(action_id, message)
 
 
+def _begin_trigger_after_cancel_window(action_id: str) -> bool:
+    action = admin_repository.get(action_id)
+    if not action or action.get("phase") != "cancel_window":
+        return False
+    deadline = datetime.fromisoformat(str(action["cancel_window_until"]))
+    time.sleep(max(0, (deadline - datetime.now(timezone.utc)).total_seconds()))
+    return admin_repository.begin_trigger_preparation(action_id)
+
+
 def _prepare_orchestrated_trigger(action_id: str, payload: dict) -> None:
     """Run the potentially slow validation, manifest, reservation and submit stages."""
     selected_indices: dict[str, list[int]] | None = None
     reservations_attempted = False
     try:
-        admin_repository.set_trigger_phase(action_id, "validating")
+        if not _begin_trigger_after_cancel_window(action_id):
+            return
         _require_ulrpm_orchestrator_access()
         request = OrchestratedBackfillRequest.model_validate(payload)
         params = TriggerParams(**request.params.model_dump())
         _validate_trigger_params_for_queue(params)
-        selected_indices = _selected_month_indices(
-            request.machine_ids, request.since, request.until, request.month_indices_by_machine
+        windows_by_machine = _resolve_windows(
+            request.machine_ids,
+            request.since,
+            request.until,
+            request.month_indices_by_machine or None,
+            request.split.model_dump(),
         )
+        selected_indices = {
+            machine_id: sorted({window.month_index for window in windows})
+            for machine_id, windows in windows_by_machine.items()
+        }
         _validate_selected_indices_for_queue(selected_indices)
         _reject_non_online_months(selected_indices)
 
         admin_repository.set_trigger_phase(action_id, "preparing_manifests")
+        _require_split_supported(request.split.model_dump())
         manifest = manifest_writer.write_orchestrated_monthly_manifests(
             machine_ids=request.machine_ids,
             since=request.since,
             until=request.until,
             manifest_prefix=request.manifest_prefix,
-            month_indices_by_machine=selected_indices,
+            month_indices_by_machine=request.month_indices_by_machine or None,
+            split=request.split.model_dump(),
         )
+        _assert_windows_sequential(manifest.windows_by_machine)
         _reject_active_months(manifest.month_indices_by_machine)
         cwd, command = command_builder.build_ulrpm_orchestrator_trigger(
             machine_ids=manifest.machine_ids,
@@ -1078,6 +1358,7 @@ def _prepare_orchestrated_trigger(action_id: str, payload: dict) -> None:
             end_index=manifest.end_index,
             month_indices_by_machine=manifest.month_indices_by_machine,
             params=params,
+            manifest_plan=_manifest_plan_from_windows(manifest.windows_by_machine),
         )
         admin_repository.record_completed(
             action="manifest",
@@ -1091,6 +1372,8 @@ def _prepare_orchestrated_trigger(action_id: str, payload: dict) -> None:
         admin_repository.update_trigger(
             action_id, phase="submitting", command=command, cwd=cwd,
             machine_ids=manifest.machine_ids,
+            manifest_windows=manifest.windows_by_machine,
+            split=manifest.split,
         )
         _reserve_months_for_action(manifest.month_indices_by_machine, action_id)
         reservations_attempted = True
@@ -1107,7 +1390,8 @@ def _prepare_all_inventory_trigger(action_id: str, payload: dict) -> None:
     selected_indices: dict[str, list[int]] | None = None
     reservations_attempted = False
     try:
-        admin_repository.set_trigger_phase(action_id, "validating")
+        if not _begin_trigger_after_cancel_window(action_id):
+            return
         _require_ulrpm_orchestrator_access()
         request = AllMachinesBackfillRequest.model_validate(payload)
         params = TriggerParams(**request.params.model_dump())
@@ -1120,20 +1404,31 @@ def _prepare_all_inventory_trigger(action_id: str, payload: dict) -> None:
         machine_ids = validate_machine_ids(machine_ids)
         if params.max_parallel_steps > len(machine_ids):
             raise ValueError(f"Machine lane concurrency cannot exceed selected machine count ({len(machine_ids)})")
-        selected_indices = _selected_month_indices(
-            machine_ids, request.since, request.until, request.month_indices_by_machine
+        windows_by_machine = _resolve_windows(
+            machine_ids,
+            request.since,
+            request.until,
+            request.month_indices_by_machine or None,
+            request.split.model_dump(),
         )
+        selected_indices = {
+            machine_id: sorted({window.month_index for window in windows})
+            for machine_id, windows in windows_by_machine.items()
+        }
         _validate_selected_indices_for_queue(selected_indices)
         _reject_non_online_months(selected_indices)
 
         admin_repository.set_trigger_phase(action_id, "preparing_manifests")
+        _require_split_supported(request.split.model_dump())
         manifest = manifest_writer.write_orchestrated_monthly_manifests(
             machine_ids=machine_ids,
             since=request.since,
             until=request.until,
             manifest_prefix=request.manifest_path,
-            month_indices_by_machine=selected_indices,
+            month_indices_by_machine=request.month_indices_by_machine or None,
+            split=request.split.model_dump(),
         )
+        _assert_windows_sequential(manifest.windows_by_machine)
         _reject_active_months(manifest.month_indices_by_machine)
         cwd, command = command_builder.build_ulrpm_orchestrator_trigger(
             machine_ids=manifest.machine_ids,
@@ -1142,6 +1437,7 @@ def _prepare_all_inventory_trigger(action_id: str, payload: dict) -> None:
             end_index=manifest.end_index,
             month_indices_by_machine=manifest.month_indices_by_machine,
             params=params,
+            manifest_plan=_manifest_plan_from_windows(manifest.windows_by_machine),
         )
         admin_repository.record_completed(
             action="manifest",
@@ -1155,6 +1451,8 @@ def _prepare_all_inventory_trigger(action_id: str, payload: dict) -> None:
         admin_repository.update_trigger(
             action_id, phase="submitting", command=command, cwd=cwd,
             machine_ids=manifest.machine_ids,
+            manifest_windows=manifest.windows_by_machine,
+            split=manifest.split,
         )
         _reserve_months_for_action(manifest.month_indices_by_machine, action_id)
         reservations_attempted = True
@@ -1200,6 +1498,39 @@ def _reject_non_online_months(month_indices_by_machine: dict[str, list[int]]) ->
             "Selected months are not backfillable; only online months can be submitted: "
             + ", ".join(rejected)
         )
+
+
+def _reject_selected_gap_months(machine_id: str, month_indices: list[int]) -> None:
+    """Require every explicitly selected index to remain an online gap in latest scan."""
+    ids = validate_machine_ids([machine_id])
+    if len(set(month_indices)) != len(month_indices) or not month_indices:
+        raise ValueError("month_indices must be a non-empty list without duplicates")
+    if any(not isinstance(index, int) or isinstance(index, bool) or index < 0 for index in month_indices):
+        raise ValueError("month_indices must contain non-negative integer indices")
+    latest = repository.latest()
+    machines = latest.get("snapshot", {}).get("machines", [])
+    machine = next((item for item in machines if item.get("machine_id") == ids[0]), None)
+    indexed = {}
+    if machine:
+        for candidate in machine.get("months", []):
+            partition = candidate.get("partition", {})
+            try:
+                index = orchestrator_month_index(int(partition["year"]), int(partition["month"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            indexed[index] = candidate
+    rejected = []
+    for index in month_indices:
+        candidate = indexed.get(index)
+        if candidate is None or candidate.get("status") != "needs_backfill" or not is_month_backfillable(candidate):
+            try:
+                year, month = month_for_index(index)
+                label = f"{year}-{month:02d}"
+            except ValueError:
+                label = f"month-index-{index}"
+            rejected.append(label)
+    if rejected:
+        raise ValueError("Selected months are stale or ineligible; only online needs_backfill months qualify: " + ", ".join(rejected))
 
 
 def _reject_active_months(month_indices_by_machine: dict[str, list[int]]) -> None:
@@ -1330,11 +1661,50 @@ def _wait_and_submit_replacements(action_id: str, machine_id: str, parent_id: st
         else:
             raise RuntimeError("Timed out waiting for the cancelled parent workflow to become terminal")
 
+        # Parent terminate does not stop a running child FSTBackfill; wait for children too.
+        child_ids = _active_child_workflow_ids_for_machine(machine_id, month_indices)
+        _wait_for_machine_children_idle(machine_id, month_indices, deadline=deadline, child_ids=child_ids)
         action["events"].append({"state": "replacement_submitted", "at": datetime.now().isoformat()})
         _reject_non_online_months({machine_id: month_indices})
-        manifest = manifest_writer.write_orchestrated_monthly_manifests(
-            machine_ids=[machine_id], since="", until="", month_indices_by_machine={machine_id: month_indices}
-        )
+        stored_windows = None
+        stored_split = {"mode": "month", "days": None}
+        # Prefer windows persisted on the original trigger action (same parent prefix action:...).
+        parent_action_id = parent_id.removeprefix("action:") if parent_id.startswith("action:") else None
+        if parent_action_id:
+            parent_action = admin_repository.get(parent_action_id) or {}
+            stored = (parent_action.get("manifest_windows") or {}).get(machine_id)
+            if stored:
+                stored_windows = [
+                    item for item in stored
+                    if int(item.get("month_index", -1)) in set(month_indices)
+                ]
+                stored_split = parent_action.get("split") or stored_split
+        if stored_windows:
+            # Rebuild via since/until of the stored plan's union, filtered to the months.
+            first_since = min(item["since"] for item in stored_windows).replace("/", "-")
+            # stored since is YYYY/MM/DD/HH → convert to ISO for the writer
+            def _slash_to_iso(value: str) -> str:
+                parts = value.split("/")
+                return f"{parts[0]}-{parts[1]}-{parts[2]}T{parts[3]}:00:00Z"
+            since_iso = _slash_to_iso(min(item["since"] for item in stored_windows))
+            until_iso = _slash_to_iso(max(item["until"] for item in stored_windows))
+            manifest = manifest_writer.write_orchestrated_monthly_manifests(
+                machine_ids=[machine_id],
+                since=since_iso,
+                until=until_iso,
+                month_indices_by_machine={machine_id: month_indices},
+                split=stored_split,
+            )
+        else:
+            import logging
+            logging.getLogger(__name__).info(
+                "Replacement for %s has no stored manifest_windows; falling back to full months",
+                machine_id,
+            )
+            manifest = manifest_writer.write_orchestrated_monthly_manifests(
+                machine_ids=[machine_id], since="", until="", month_indices_by_machine={machine_id: month_indices}
+            )
+        _assert_windows_sequential(manifest.windows_by_machine)
         is_prod = environment == "prod"
         replacement_params = TriggerParams(
             environment=environment,
@@ -1348,6 +1718,7 @@ def _wait_and_submit_replacements(action_id: str, machine_id: str, parent_id: st
             start_index=manifest.start_index, end_index=manifest.end_index,
             month_indices_by_machine=manifest.month_indices_by_machine,
             params=replacement_params,
+            manifest_plan=_manifest_plan_from_windows(manifest.windows_by_machine),
         )
         replacement = admin_repository.create(
             action="trigger", command=command, cwd=cwd,

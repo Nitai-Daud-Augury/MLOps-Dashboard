@@ -21,9 +21,13 @@ export async function getCachedJson<T>(key: string, url: string, maxAgeMs: numbe
   return value;
 }
 
-export function workflowSocketUrl() {
-  const url = new URL(API_BASE);
+export function workflowSocketUrl(apiBase = API_BASE, origin = window.location.origin) {
+  // API_BASE is empty for the normal same-origin setup. URL() needs an
+  // absolute base; otherwise opening Live Operations throws and blanks React.
+  const url = new URL(apiBase || '/', origin);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.pathname = `${url.pathname.replace(/\/$/, '')}/api/admin/workflows/live`;
+  url.search = '';
+  url.hash = '';
   return url.toString();
 }

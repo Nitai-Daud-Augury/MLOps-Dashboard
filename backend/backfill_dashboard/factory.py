@@ -18,7 +18,10 @@ from .runtime_mode import runtime_info
 def build_components():
     settings = get_settings()
     runtime = runtime_info()
-    file_inventory = FileMachineInventoryAdapter(FileMachineInventoryProvider(settings.machine_ids_file))
+    file_inventory = FileMachineInventoryAdapter(
+        FileMachineInventoryProvider(settings.machine_ids_file),
+        settings.test_machine_ids or (),
+    )
     # This console is intentionally limited to the curated 42-machine ULRPM
     # cohort. Do not re-enable Mongo here: it expands campaign scope beyond
     # the daily-monitoring population.

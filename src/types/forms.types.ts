@@ -44,7 +44,10 @@ export interface ManifestResult {
   manifest_path: string;
   manifest_prefix?: string;
   rows: number;
+  manifest_count?: number;
   blob_url: string;
+  windows?: Record<string, Array<{ month_index: number; since: string; until: string; manifest_path?: string }>>;
+  split?: { mode: string; days?: number | null };
 }
 export interface StopForm {
   environment: EnvironmentTarget;

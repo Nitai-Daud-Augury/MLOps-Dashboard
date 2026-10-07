@@ -13,3 +13,9 @@ class MultiMachineManifestRequestModel(BaseModel):
     since: str = ""
     until: str = ""
     manifest_path: str = ""
+
+
+class DailyGapManifestRequestModel(BaseModel):
+    machine_id: str = ""
+    month_indices: list[int] = Field(default_factory=list)
+    manifest_prefix: str = ""

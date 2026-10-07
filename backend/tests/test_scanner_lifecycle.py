@@ -107,13 +107,18 @@ class Inventory:
         return [self.record] if self.record else []
 
 
-def _full_scan(monkeypatch: pytest.MonkeyPatch, lifecycle, blob_store: BlobStore):
+def _full_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    lifecycle,
+    blob_store: BlobStore,
+    lifecycle_status: str = "healthy",
+):
     from backfill_dashboard.config import Settings
     import backfill_dashboard.scanner as scanner_module
 
     settings = Settings(scan_workers=1)
     object.__setattr__(settings, "target_features", ["f1"])
-    scanner = BackfillScanner(settings, Inventory(), blob_store, SimpleNamespace(row_counts=lambda *_: {}), lifecycle, "healthy")
+    scanner = BackfillScanner(settings, Inventory(), blob_store, SimpleNamespace(row_counts=lambda *_: {}), lifecycle, lifecycle_status)
     monkeypatch.setattr(scanner, "_discover_coverage_starts", lambda *args, **kwargs: {"m1": (2026, 6)})
     monkeypatch.setattr(scanner, "_coverage_partitions", lambda starts: [MonthPartition(6, 2026, 6), MonthPartition(7, 2026, 7)])
     monkeypatch.setattr(scanner_module, "load_fst_schema_contract", lambda _: SimpleNamespace(columns=("f1",), schema_version="test"))
@@ -171,3 +176,22 @@ def test_scan_carries_inventory_identity_to_machine_status(monkeypatch: pytest.M
 
     assert snapshot.machines[0].display_name == "ULRPM E2E test #5"
     assert snapshot.machines[0].is_test_machine
+
+
+def test_scan_reconnects_mongo_after_startup_network_failure(monkeypatch: pytest.MonkeyPatch):
+    import backfill_dashboard.scanner as scanner_module
+
+    record = MachineRecord("m1", display_name="ULRPM E2E test #5", is_test_machine=True)
+    attempts = []
+
+    def connect():
+        attempts.append(True)
+        return Inventory(record=record), "healthy"
+
+    monkeypatch.setattr(scanner_module, "build_mongo_provider", connect)
+    snapshot = _full_scan(monkeypatch, None, BlobStore(), "unreachable")
+
+    assert len(attempts) == 1
+    assert snapshot.machines[0].display_name == "ULRPM E2E test #5"
+    assert snapshot.machines[0].is_test_machine
+    assert "status healthy" in snapshot.warnings[0]

@@ -94,6 +94,7 @@ def test_nonlocal_workflow_routes_reject_before_side_effects(monkeypatch):
         "/api/admin/workflows/trigger",
         "/api/admin/backfills/all",
         "/api/admin/backfills/orchestrated",
+        "/api/admin/actions/action-a/cancel-before-submit",
         "/api/admin/fullrlbl/trigger",
         "/api/admin/workflows/terminate",
         "/api/admin/logs",

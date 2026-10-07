@@ -17,10 +17,22 @@ them as test assets; the badge is informational and does not remove them from in
 - `Unknown` or scan error: the scan could not establish activity. It is not backfillable.
 - Mongo lifecycle lookup is fail-open: if it is unavailable, the scan still runs and surfaces a
   warning. Treat installation dates as unverified until lifecycle status is healthy.
+- If Mongo was unreachable when the API started (for example, before connecting to the VPN),
+  the next scan retries the connection and refreshes test-machine badges from Mongo metadata.
+  Restart the API after changing `MONGODB_URL` in `.env`, then start a new scan.
 
 The scanner uses the checked-in curated cohort at `data/unique_machine_ids.txt`; Mongo does not
-expand that FST scan cohort. Inventory/runner APIs may separately use the configured inventory
-provider. Review cohort changes rather than broadening the file by default.
+expand that FST scan cohort. Test identity is maintained separately in
+`data/test_machine_ids.txt`, so badges remain available when Mongo metadata is unavailable or a
+cached snapshot is old. Override the registry path with `MLOPS_TEST_MACHINE_IDS_FILE`; optional
+comma-separated additive IDs can be supplied in `MLOPS_TEST_MACHINE_IDS`. Both inputs are explicit
+allowlists and do not change the curated scan cohort.
+
+In Machine Coverage, click a data column heading to sort, and use the search and status controls
+to filter the table. The CSV export offers All, Backfilled, and Need Backfill machine groups and
+includes every page in the selected group. The machine ID search also applies to the export;
+the table's status filter is separate from the export group. The CSV uses the same column headings
+as Machine Coverage, with links in the Augury and Quick columns.
 
 ## Architecture and runtime limits
 
@@ -39,6 +51,31 @@ credential. The current bundle does not configure FST read or manifest-write cre
 assume deployed scans or manifest uploads are ready until those resources/network paths have been
 provisioned and verified. The campaign SQLite/JSON state uses ephemeral app storage in the current
 package and is not a durable production dispatch control plane.
+
+Dashboard orchestrated backfills (including all-inventory) wait 15 seconds after the API accepts
+the request; no manifest upload or Outerbounds call occurs during that window. The Runner offers
+**Cancel before dispatch** while the action is queued, validating, or preparing manifests. The
+backend atomically prevents a cancelled action from advancing to Argo submission. Once submission
+starts, cancellation returns 409; an accepted workflow must be stopped through the normal workflow
+controls. Only one orchestrated submission can be pending at a time. If the API process restarts
+during preparation, its abandoned queued action is not resumed and is expired by stale-action
+cleanup; it can also be cancelled explicitly before submission.
+
+In Machine Backfill, **Prepare smaller backfill windows** writes one create-only Parquet file per
+completed UTC day for selected online `needs_backfill` months, or all online gaps when none are
+selected. The panel previews the completed-day count, caps each request at 93 days, and groups
+the resulting paths by month. These are reviewable manifest plans only: they do not start a
+workflow, and **Start monthly backfill** continues to use monthly manifests. Keep each daily
+file separate when manually running a child flow; combining
+them recreates a multi-day manifest. The scan identifies gap months, so the daily windows cover
+every completed day in those months rather than identifying exact missing days. A shorter window
+may reduce peak fetch memory when run as a separate child, but does not guarantee against OOM or
+reduce total cost; additional child runs add startup cost. Checked-in memory requests are 500,000
+MB for fetch/feature extraction and 300,000 MB for seed/anomaly features. The live child
+WorkflowTemplate generation 5 was verified on 2026-10-05 and still requests 300,000 MB for
+all four heavy steps on `obp-main-big3`. Daily execution still requires a day-aware sequential orchestrator, safe
+seeding, boundary validation, and a measured canary. Each request is capped at 93 completed days
+to keep the synchronous upload bounded; select fewer gap months when the cap is exceeded.
 
 ## Repository layout
 
