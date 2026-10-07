@@ -39,8 +39,5 @@ htmlcov/
 Thumbs.db
 
 
-# Local test-machine allowlist (do not push)
-data/test_machine_ids.txt
-
 # Local Node poll contract check (pytest covers the same; not in CI)
 scripts/check-admin-action-poll.mjs
