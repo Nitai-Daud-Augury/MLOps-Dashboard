@@ -1,5 +1,8 @@
+from contextlib import contextmanager
 from datetime import datetime
 import json
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -24,7 +27,18 @@ from backfill_dashboard.admin import (
 from backfill_dashboard.control_store import JsonControlStore
 from backfill_dashboard.manifests import OrchestratedManifestWriteResult
 from backfill_dashboard.schemas import OrchestratedBackfillRequest, OrchestratedManifestRequest
-from sibling_repos import requires_metaflow_flow
+
+# Repo root lives under WORKSPACE_ROOT, so stubs here pass _safe_workspace_path in CI.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@contextmanager
+def _workspace_flow_stub(filename: str, content: str = "# test stub flow\n"):
+    """Minimal flow file under the checkout so create-command tests need no Augury sibling."""
+    with tempfile.TemporaryDirectory(prefix=".pytest_flow_", dir=_REPO_ROOT) as tmp:
+        flow = Path(tmp) / filename
+        flow.write_text(content, encoding="utf-8")
+        yield flow
 
 
 def test_workflow_review_repository_persists_acknowledgements(tmp_path):
@@ -154,27 +168,28 @@ def test_admin_action_repository_allows_only_one_preparing_trigger(tmp_path):
     assert next_action.id != pending.id
 
 
-@requires_metaflow_flow
 def test_create_command_uses_metaflow_argo_create():
     builder = WorkflowCommandBuilder()
 
-    cwd, command = builder.build_create(
-        WorkflowSourceRequest(source_type="local", local_flow_path=str(DEFAULT_FLOW_PATH))
-    )
+    with _workspace_flow_stub("FSTBackfill_prod_flow.py") as prod_flow:
+        cwd, command = builder.build_create(
+            WorkflowSourceRequest(source_type="local", local_flow_path=str(prod_flow))
+        )
 
-    assert cwd == DEFAULT_FLOW_PATH.parent
+    assert cwd == prod_flow.parent
     assert command[-5:] == ["--no-pylint", "argo-workflows", "create", "--max-workers", "1"]
 
 
 def test_standard_backfill_create_keeps_default_parallelism():
     builder = WorkflowCommandBuilder()
-    standard_flow = DEFAULT_FLOW_PATH.with_name("FSTBackfill_standard_flow.py")
 
-    _, command = builder.build_create(
-        WorkflowSourceRequest(source_type="local", local_flow_path=str(standard_flow))
-    )
+    with _workspace_flow_stub("FSTBackfill_standard_flow.py") as standard_flow:
+        _, command = builder.build_create(
+            WorkflowSourceRequest(source_type="local", local_flow_path=str(standard_flow))
+        )
 
     assert command[-3:] == ["--no-pylint", "argo-workflows", "create"]
+    assert "--max-workers" not in command
 
 
 def test_prod_trigger_requires_confirmation():
