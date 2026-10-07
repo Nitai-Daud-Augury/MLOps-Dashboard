@@ -54,6 +54,9 @@ export interface AdminAction {
   workflow_id?: string;
   flow_name?: string;
   phase?: string;
+  cancel_window_until?: string;
+  manifest_windows?: Record<string, unknown>;
+  split?: { mode: string; days?: number | null };
 }
 export interface AdminReadinessCheck {
   ready: boolean;

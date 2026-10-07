@@ -209,6 +209,8 @@ class ReportRepository:
                 machine["augury_url"] = self.settings.augury_machine_url_template.format(
                     machine_id=machine_id
                 )
+                if machine_id.lower() in (self.settings.test_machine_ids or ()):
+                    machine["is_test_machine"] = True
         return snapshot
 
     def _auto_expire_stuck_scan(self) -> None:

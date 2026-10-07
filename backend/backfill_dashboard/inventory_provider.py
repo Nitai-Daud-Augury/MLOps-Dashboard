@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any, Protocol, Sequence
 
 from .classification import CLASSIFIER_VERSION, classify_machine
@@ -118,13 +118,20 @@ def decode_cursor(value: str | None) -> str:
 
 
 class FileMachineInventoryAdapter:
-    def __init__(self, provider: FileMachineInventoryProvider):
+    def __init__(self, provider: FileMachineInventoryProvider, test_machine_ids: Sequence[str] = ()):
         self.provider = provider
+        self.test_machine_ids = frozenset(machine_id.lower() for machine_id in test_machine_ids)
         self._records: list[MachineRecord] | None = None
 
     def _all(self) -> list[MachineRecord]:
         if self._records is None:
-            self._records = [_record({"_id": mid, "tags": ["ulrpm"], "endpoints": [{"type": "low_rpm_us"}], "status": "active"}, "file") for mid in self.provider.list_machine_ids()]
+            records = [_record({"_id": mid, "tags": ["ulrpm"], "endpoints": [{"type": "low_rpm_us"}], "status": "active"}, "file") for mid in self.provider.list_machine_ids()]
+            self._records = [
+                replace(record, is_test_machine=True)
+                if record.machine_id.lower() in self.test_machine_ids and not record.is_test_machine
+                else record
+                for record in records
+            ]
         return self._records
 
     def list_machine_ids(self) -> list[str]:

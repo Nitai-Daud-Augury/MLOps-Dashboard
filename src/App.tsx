@@ -2,9 +2,21 @@ import type { ActiveMonth, AdminAction, AdminReadiness, AdminSpec, AdminView, Al
 import { API_BASE, BLOB_SOURCE_STORAGE_KEY, DEFAULT_DEV_NAMESPACE, DEFAULT_OUTERBOUNDS_URL, EMPTY_MACHINES, OUTERBOUNDS_BASE, PROD_ACCOUNT, PROD_CONFIRMATION, PROD_CONTAINER, RECOMMENDED_MACHINE_CONCURRENCY, STATUS_OPTIONS, TEST_ACCOUNT, TEST_CONTAINER } from './constants';
 import { backfillMonthUntil, formatElapsedTime, formatNumber, getCachedJson, orchestratorMonthIndex, orchestratorMonthsThroughToday, utcToday, workflowSocketUrl, writeCachedJson } from './utils';
 import { useToasts } from './hooks';
-import { CopyMachineIdButton, CurrentCostPanel, EmptyState, LoadingMetrics, LoadingWidget, LogViewer, ManifestCreatedDialog, Progress, StatusPill, ToastContainer } from './components';
+import { CopyMachineIdButton, CurrentCostPanel, EmptyState, LoadingMetrics, LoadingWidget, LogViewer, ManifestCreatedDialog, Progress, StatusPill, TestMachineBadge, ToastContainer } from './components';
 import { MachineFeatureChart } from './features/machine-feature-chart/MachineFeatureChart';
 import { CampaignWorkspace } from './features/campaigns';
+import {
+  BackfillRangeFields,
+  BackfillSplitSelector,
+  buildOrchestratedPayload,
+  inclusiveEndDateToExclusiveUntil,
+  isAdminActionTerminal,
+  monthIndicesInRange,
+  startAdminActionPoll,
+  startDateToSince,
+  useOrchestratedBackfillSubmission,
+  type SplitSpec,
+} from './features/backfill';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
@@ -12,12 +24,14 @@ import {
   Activity,
   Check,
   CheckCircle2,
-  CalendarDays,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   Database,
   Download,
+  ArrowDown,
+  ArrowDownUp,
+  ArrowUp,
   ExternalLink,
   Eye,
   FileCode2,
@@ -39,12 +53,23 @@ import {
 } from 'lucide-react';
 import './App.css';
 
-function TestMachineBadge({ isTest }: { isTest?: boolean }) {
-  return isTest ? <span className="test-machine-badge" title="Test machine; exclude from real-machine reporting">Test</span> : null;
-}
+type MachineSortKey = 'machine' | 'status' | 'coverage' | 'installed' | 'activity' | 'first_gap' | 'rows';
+type MachineExportScope = 'all' | 'backfilled' | 'needs_backfill';
 
+const MACHINE_SORT_COLUMNS: { key: MachineSortKey; label: string }[] = [
+  { key: 'machine', label: 'Machine' },
+  { key: 'status', label: 'Status' },
+  { key: 'coverage', label: 'Coverage' },
+  { key: 'installed', label: 'Installed' },
+  { key: 'activity', label: 'Online / Offline' },
+  { key: 'first_gap', label: 'First Gap' },
+  { key: 'rows', label: 'Rows' },
+];
 
-
+const MACHINE_CSV_COLUMNS = [
+  'Machine', 'Status', 'Coverage', 'Installed', 'Online / Offline', 'First Gap',
+  'Rows', 'Augury', 'Quick',
+];
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('monitor');
@@ -253,6 +278,7 @@ function App() {
         {activeTab === 'monitor' ? (
           <MonitorTab
             payload={payload}
+            machines={machines}
             filteredMachines={filteredMachines}
             statusFilter={statusFilter}
             query={query}
@@ -267,7 +293,6 @@ function App() {
             onSourceAccount={setSourceAccount}
             onSourceContainer={setSourceContainer}
             onToast={addToast}
-            workflowMutationsEnabled={workflowMutationsEnabled}
           />
         ) : (
           activeTab === 'admin' ? <AdminTab onToast={addToast} workflowMutationsEnabled={workflowMutationsEnabled} /> : <SandboxTab />
@@ -279,6 +304,7 @@ function App() {
 
 function MonitorTab({
   payload,
+  machines,
   filteredMachines,
   statusFilter,
   query,
@@ -293,9 +319,9 @@ function MonitorTab({
   onSourceAccount,
   onSourceContainer,
   onToast,
-  workflowMutationsEnabled,
 }: {
   payload: StatusPayload | null;
+  machines: MachineStatus[];
   filteredMachines: MachineStatus[];
   statusFilter: (typeof STATUS_OPTIONS)[number];
   query: string;
@@ -310,7 +336,6 @@ function MonitorTab({
   onSourceAccount: (value: string) => void;
   onSourceContainer: (value: string) => void;
   onToast: (type: Toast['type'], message: string) => void;
-  workflowMutationsEnabled: boolean;
 }) {
   const summary = payload?.snapshot.summary;
   const warnings = payload?.snapshot.warnings ?? [];
@@ -330,8 +355,52 @@ function MonitorTab({
   const [quickMachine, setQuickMachine] = useState<MachineStatus | null>(null);
   const [filterPulse, setFilterPulse] = useState(false);
   const [activeBackfillCount, setActiveBackfillCount] = useState(0);
-  const activeByMachine: Record<string, ActiveMonth[]> = {};
+  const [sortKey, setSortKey] = useState<MachineSortKey>('machine');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  const [exportScope, setExportScope] = useState<MachineExportScope>('all');
   const PAGE_SIZE = 15;
+
+  const sortedMachines = useMemo(
+    () => sortCoverageMachines(filteredMachines, sortKey, sortDirection),
+    [filteredMachines, sortKey, sortDirection],
+  );
+  const exportMachines = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return sortCoverageMachines(machines.filter((machine) =>
+      (exportScope === 'all' || machine.status === exportScope)
+      && (!needle || machine.machine_id.toLowerCase().includes(needle))), sortKey, sortDirection);
+  }, [machines, exportScope, query, sortKey, sortDirection]);
+
+  const toggleSort = (key: MachineSortKey) => {
+    setSortDirection((current) => sortKey === key && current === 'asc' ? 'desc' : 'asc');
+    setSortKey(key);
+    setCurrentPage(1);
+  };
+
+  const exportCsv = () => {
+    const rows = exportMachines.map((machine) => [
+      machine.display_name && machine.display_name !== machine.machine_id
+        ? `${machine.display_name} (${machine.machine_id})` : machine.machine_id,
+      labelForStatus(machine.status),
+      `${machine.months_complete}/${machine.months_expected}`,
+      machine.installation_at ? formatTimestamp(machine.installation_at) : 'Unknown',
+      `${machine.online_months ?? 0} online / ${machine.offline_months ?? 0} offline`,
+      machine.first_missing_month ?? 'None',
+      String(machine.production_rows),
+      machine.augury_url,
+      quickMachineHref(machine.machine_id),
+    ]);
+    const csv = [MACHINE_CSV_COLUMNS, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');
+    const url = URL.createObjectURL(new Blob([`\uFEFF${csv}\r\n`], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `machine-coverage-${exportScope}-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    onToast('success', `Exported ${exportMachines.length} machine${exportMachines.length === 1 ? '' : 's'} to CSV.`);
+  };
 
   useEffect(() => {
     if (!scanRunning || !scanStartedAt) { setScanElapsed(0); return; }
@@ -373,8 +442,8 @@ function MonitorTab({
       .catch(() => setActiveBackfillCount(0));
   }, [payload]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredMachines.length / PAGE_SIZE));
-  const paginatedMachines = filteredMachines.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(sortedMachines.length / PAGE_SIZE));
+  const paginatedMachines = sortedMachines.slice((Math.min(currentPage, totalPages) - 1) * PAGE_SIZE, Math.min(currentPage, totalPages) * PAGE_SIZE);
   const healthLevel = !summary ? 'loading'
     : (summary.partitions_with_scan_errors ?? 0) > 0 ? 'error'
     : (summary.missing_partitions ?? 0) > 0 ? 'warning'
@@ -525,11 +594,11 @@ function MonitorTab({
           <div className="filters">
             <label className="search-field">
               <Search size={16} />
-              <input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Machine ID" />
+              <input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search machine ID" aria-label="Search machine ID" />
             </label>
             <label className="select-field">
               <Filter size={16} />
-              <select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value as typeof statusFilter)}>
+              <select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value as typeof statusFilter)} aria-label="Filter machine status">
                 {STATUS_OPTIONS.map((option) => (
                   <option value={option} key={option}>
                     {labelForStatus(option)}
@@ -539,20 +608,49 @@ function MonitorTab({
             </label>
           </div>
 
+          <div className="machine-export-bar">
+            <div className="machine-export-copy">
+              <span className="machine-export-icon"><Download size={17} aria-hidden="true" /></span>
+              <div><strong>Export machine coverage</strong><small>Choose a group. The machine ID search applies; all pages are included.</small></div>
+            </div>
+            <div className="machine-export-controls">
+              <label htmlFor="machine-export-scope">Machines</label>
+              <select id="machine-export-scope" value={exportScope} onChange={(event) => setExportScope(event.target.value as MachineExportScope)}>
+                <option value="all">All</option>
+                <option value="backfilled">Backfilled</option>
+                <option value="needs_backfill">Need Backfill</option>
+              </select>
+              <button className="machine-export-button" type="button" onClick={exportCsv} disabled={dashboardLoading || exportMachines.length === 0}>
+                <Download size={16} aria-hidden="true" /> Export CSV <span className="machine-export-count">{exportMachines.length}</span>
+              </button>
+            </div>
+          </div>
+
           {dashboardLoading ? <LoadingWidget label="Loading machine coverage" /> : <>
           <div className={`table-wrap ${filterPulse ? 'filter-pulse' : ''}`}>
-            <table>
+            <table className="machine-coverage-table">
+              <colgroup>
+                <col style={{ width: '21%' }} />
+                <col style={{ width: '12%' }} />
+                <col style={{ width: '11%' }} />
+                <col style={{ width: '14%' }} />
+                <col style={{ width: '16%' }} />
+                <col style={{ width: '9%' }} />
+                <col style={{ width: '7%' }} />
+                <col style={{ width: '5%' }} />
+                <col style={{ width: '5%' }} />
+              </colgroup>
               <thead>
                 <tr>
-                  <th>Machine</th>
-                  <th>Status</th>
-                  <th>Coverage</th>
-                  <th>Installed</th>
-                  <th>Online / Offline</th>
-                  <th>First Gap</th>
-                  <th>Rows</th>
-                  <th>Active backfill</th>
-                  <th>Backfill</th>
+                  {MACHINE_SORT_COLUMNS.map(({ key, label }) => (
+                    <th key={key} aria-sort={sortKey === key ? sortDirection === 'asc' ? 'ascending' : 'descending' : 'none'}>
+                      <button className="machine-sort-button" type="button" onClick={() => toggleSort(key)} title={`Sort by ${label}`}>
+                        {label}{sortKey === key
+                          ? sortDirection === 'asc' ? <ArrowUp size={13} aria-hidden="true" className="active" /> : <ArrowDown size={13} aria-hidden="true" className="active" />
+                          : <ArrowDownUp size={13} aria-hidden="true" />}
+                      </button>
+                    </th>
+                  ))}
                   <th>Augury</th>
                   <th>Quick</th>
                 </tr>
@@ -572,17 +670,13 @@ function MonitorTab({
                     tabIndex={0}
                     title="Open detailed machine view in a new tab"
                   >
-                    <td className="machine-id-cell"><span className="mono">{machine.machine_id}</span><TestMachineBadge isTest={machine.is_test_machine} /><CopyMachineIdButton machineId={machine.machine_id} onCopied={() => onToast('success', 'Machine ID copied.')} /></td>
+                    <td className="machine-id-cell"><div className="machine-identity"><span className="machine-identity-label">{machine.display_name && machine.display_name !== machine.machine_id ? machine.display_name : machine.machine_id}<small className="mono machine-identity-id">{machine.display_name && machine.display_name !== machine.machine_id ? machine.machine_id : ''}</small></span><TestMachineBadge isTest={machine.is_test_machine} /><CopyMachineIdButton machineId={machine.machine_id} onCopied={() => onToast('success', 'Machine ID copied.')} /></div></td>
                     <td><StatusPill status={machine.status} /></td>
                     <td><Progress value={machine.months_complete} max={machine.months_expected} /></td>
                     <td>{machine.installation_at ? formatTimestamp(machine.installation_at) : 'Unknown'}</td>
                     <td><span className="activity-count online">{machine.online_months ?? 0} online</span> <span className="activity-count offline">{machine.offline_months ?? 0} offline</span></td>
                     <td>{machine.first_missing_month ?? 'None'}</td>
                     <td>{formatNumber(machine.production_rows)}</td>
-                    <td>{activeByMachine[machine.machine_id]?.filter((item) => ['queued', 'running', 'cancel_requested', 'stopping', 'requeue_pending'].includes(item.state)).length ? <span className="task-phase-badge running">{activeByMachine[machine.machine_id].filter((item) => ['queued', 'running', 'cancel_requested', 'stopping', 'requeue_pending'].includes(item.state)).map((item) => `${item.year}-${String(item.month).padStart(2, '0')}`).join(', ')}</span> : '—'}</td>
-                    <td>
-                      <QuickBackfillTrigger machine={machine} activeMonths={activeByMachine[machine.machine_id] ?? []} onToast={onToast} workflowMutationsEnabled={workflowMutationsEnabled} />
-                    </td>
                     <td>
                       <a className="icon-link" href={machine.augury_url} target="_blank" rel="noreferrer" title="Open machine in Augury" onClick={(event) => event.stopPropagation()}>
                         <ExternalLink size={16} />
@@ -598,7 +692,8 @@ function MonitorTab({
                     </td>
                   </tr>
                 ))}
-                {scanRunning ? Array.from({ length: Math.max(3, 8 - paginatedMachines.length) }, (_, index) => <tr className="scan-table-skeleton" key={`loading-${index}`}><td colSpan={11}><i /></td></tr>) : null}
+                {!scanRunning && paginatedMachines.length === 0 ? <tr className="machine-empty-row"><td colSpan={9}>No machines match the current search and status filter.</td></tr> : null}
+                {scanRunning ? Array.from({ length: Math.max(3, 8 - paginatedMachines.length) }, (_, index) => <tr className="scan-table-skeleton" key={`loading-${index}`}><td colSpan={9}><i /></td></tr>) : null}
               </tbody>
             </table>
           </div>
@@ -633,124 +728,6 @@ function QuickMachineModal({ machine, onClose }: { machine: MachineStatus; onClo
 
 function MachineQuickViewPage({ machine, machineId, darkMode, onToggleTheme }: { machine: MachineStatus | null; machineId: string; darkMode: boolean; onToggleTheme: () => void }) {
   return <main className={`dashboard-shell quick-view-window ${darkMode ? 'dark' : ''}`}><header className="topbar"><div><p className="eyebrow">Quick machine view</p><div className="machine-title-row"><h1>{machineId}</h1><TestMachineBadge isTest={machine?.is_test_machine} /><CopyMachineIdButton machineId={machineId} /></div></div><div className="actions"><button className="icon-button theme-toggle" type="button" onClick={onToggleTheme} title={darkMode ? 'Use light theme' : 'Use dark theme'}>{darkMode ? <Sun size={18} /> : <Moon size={18} />}</button><button className="secondary-button" type="button" onClick={() => window.close()}><X size={16} /><span>Close</span></button>{machine ? <a className="export-link" href={detailMachineHref(machine.machine_id)} target="_blank" rel="noreferrer"><ExternalLink size={16} /><span>Full details</span></a> : null}</div></header>{machine ? <section className="panel quick-machine-panel"><div className="panel-header"><div><h2>Installed {machine.installation_at ? formatTimestamp(machine.installation_at) : 'date unknown'}</h2><p>First FST data {machine.coverage_start_month ?? 'not observed'} · {machine.reason}</p></div><a className="export-link" href={machine.augury_url} target="_blank" rel="noreferrer"><ExternalLink size={16} /><span>Augury</span></a></div><ActiveBackfillSummary machineId={machine.machine_id} /><MachineDetails machine={machine} compact /></section> : <section className="panel"><EmptyState message={`Machine ${machineId} was not found in the current scan payload.`} /></section>}</main>;
-}
-
-function QuickBackfillTrigger({ machine, activeMonths, onToast, workflowMutationsEnabled }: { machine: MachineStatus; activeMonths: ActiveMonth[]; onToast: (type: Toast['type'], msg: string) => void; workflowMutationsEnabled: boolean }) {
-  const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [submissionAction, setSubmissionAction] = useState<AdminAction | null>(null);
-  const ref = useRef<HTMLDivElement>(null);
-  const defaultRange = defaultBackfillRange(machine);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [open]);
-
-  useEffect(() => {
-    if (!submissionAction?.id || !isTriggerPreparationActive(submissionAction)) return;
-    const actionId = submissionAction.id;
-    let cancelled = false;
-    let timer: number | undefined;
-    const poll = async () => {
-      try {
-        const response = await fetch(`${API_BASE}/api/admin/actions/${encodeURIComponent(actionId)}`, { cache: 'no-store' });
-        const payload = await response.json() as { action?: AdminAction };
-        if (!response.ok || !payload.action) throw new Error('Could not refresh backfill submission status.');
-        if (cancelled) return;
-        setSubmissionAction(payload.action);
-        if (payload.action.phase === 'accepted') onToast('success', `Backfill accepted for ${machine.machine_id.slice(-8)}.`);
-        if (payload.action.phase === 'failed' || payload.action.status === 'failed') onToast('error', payload.action.error ?? 'Backfill submission failed.');
-        if (!isTriggerPreparationActive(payload.action)) return;
-      } catch (error) {
-        void error;
-      }
-      if (!cancelled) timer = window.setTimeout(() => void poll(), 1000);
-    };
-    void poll();
-    return () => { cancelled = true; if (timer !== undefined) window.clearTimeout(timer); };
-  }, [submissionAction?.id, submissionAction?.phase, submissionAction?.status, machine.machine_id]);
-
-  const trigger = async (env: EnvironmentTarget) => {
-    if (activeMonths.some((item) => ['queued', 'running', 'cancel_requested', 'stopping', 'requeue_pending'].includes(item.state))) {
-      onToast('error', `Backfill already active for ${activeMonths.filter((item) => ['queued', 'running', 'cancel_requested', 'stopping', 'requeue_pending'].includes(item.state)).map((item) => `${item.year}-${String(item.month).padStart(2, '0')}`).join(', ')}. Open the machine Backfill tab to manage it.`);
-      setOpen(false);
-      return;
-    }
-    const range = defaultBackfillRange(machine);
-    if (!range) {
-      onToast('error', 'No online eligible months are available for backfill.');
-      setOpen(false);
-      return;
-    }
-    setBusy(true);
-    try {
-      const triggerRes = await fetch(`${API_BASE}/api/admin/backfills/orchestrated`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          machine_ids: [machine.machine_id],
-          since: range.since,
-          until: range.until,
-          manifest_prefix: '',
-          params: {
-            environment: env,
-            namespace: env === 'prod' ? PROD_CONTAINER : DEFAULT_DEV_NAMESPACE,
-            storage_account_manifest_path: '',
-            include_features_to_backfill: false,
-            features_to_backfill: [],
-            max_parallel_steps: 1,
-            force_sessions_from_bucket: false,
-            confirm_production: env === 'prod',
-            confirmation_text: env === 'prod' ? PROD_CONFIRMATION : '',
-          },
-        }),
-      });
-      const triggerResult = await triggerRes.json() as { action?: AdminAction; detail?: string };
-      if (!triggerRes.ok) throw new Error(triggerResult.detail ?? `Trigger failed: ${triggerRes.status}`);
-      if (!triggerResult.action?.id) throw new Error('The backfill request was accepted without an action ID.');
-      setSubmissionAction(triggerResult.action);
-      onToast('info', `Backfill request accepted for ${machine.machine_id.slice(-8)}; preparation is starting.`);
-      setOpen(false);
-    } catch (err) {
-      onToast('error', err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="quick-backfill" ref={ref} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-      <button
-        className={`quick-backfill-toggle ${open ? 'open' : ''}`}
-        type="button"
-        title={!workflowMutationsEnabled ? 'Workflow operations are disabled in monitor-only runtime' : defaultRange ? 'Trigger backfill for the first online eligible month' : 'No online eligible month; backfill is unavailable'}
-        aria-label={!workflowMutationsEnabled ? 'Backfill unavailable: monitor-only runtime' : defaultRange ? 'Trigger backfill for the first online eligible month' : 'Backfill unavailable: no online eligible month'}
-        onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
-        disabled={!workflowMutationsEnabled || busy || !defaultRange || isTriggerPreparationActive(submissionAction)}
-      >
-        {busy ? <Loader2 className="spin" size={14} /> : <Zap size={14} />}
-        <ChevronDown size={12} className={`chevron ${open ? 'flipped' : ''}`} />
-      </button>
-      {open && (
-        <div className="quick-backfill-dropdown animate-dropdown">
-          <button className="quick-backfill-option dev" type="button" onClick={() => void trigger('dev')} disabled={busy}>
-            <Play size={13} />
-            <span>Dev</span>
-          </button>
-          <button className="quick-backfill-option prod" type="button" onClick={() => void trigger('prod')} disabled={busy}>
-            <Play size={13} />
-            <span>Production</span>
-          </button>
-        </div>
-      )}
-      {submissionAction ? <span className={`quick-trigger-progress${submissionAction.phase === 'failed' ? ' failed' : ''}`} role="status" aria-live="polite" title={submissionAction.error ?? undefined}>{submissionAction.phase === 'failed' ? `${triggerPhaseLabel(submissionAction.phase)}: ${submissionAction.error ?? 'submission failed'}` : triggerPhaseLabel(submissionAction.phase)}</span> : null}
-    </div>
-  );
 }
 
 function MachineDetailPage({
@@ -850,7 +827,7 @@ function MachineDetailPage({
           <section className="panel"><div className="panel-header"><div><p className="eyebrow">Coverage overview</p><h2>Monthly partition health</h2><p>Review coverage and select a month to inspect its status.</p></div></div><MachineDetails machine={machine} activeMonths={activeMonths} compact /></section>
           </> : null}
           {machineView === 'features' ? <MachineFeatureChart machine={machine} /> : null}
-          {machineView === 'backfill' ? <MachineBackfillPanel machine={machine} onToast={onToast} workflowMutationsEnabled={workflowMutationsEnabled} /> : null}
+          {machineView === 'backfill' ? <MachineBackfillPanel key={machine.machine_id} machine={machine} onToast={onToast} workflowMutationsEnabled={workflowMutationsEnabled} /> : null}
           {machineView === 'running' ? <MachineRuns machineId={machine.machine_id} mode="running" /> : null}
           {machineView === 'history' ? <MachineRuns machineId={machine.machine_id} mode="history" /> : null}
           {machineView === 'observability' ? <MachineTaskLogs machineId={machine.machine_id} /> : null}
@@ -869,8 +846,12 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
   // Disabled until the parent pod receives an authorized control-store credential.
   const perMonthStopsEnabled = false;
   const [selectedMonthIndices, setSelectedMonthIndices] = useState<number[]>([]);
+  const [machinePickMode, setMachinePickMode] = useState<'months' | 'range'>('months');
+  const [machineRangeStart, setMachineRangeStart] = useState('');
+  const [machineRangeEnd, setMachineRangeEnd] = useState('');
+  const [machineSplit, setMachineSplit] = useState<SplitSpec>({ mode: 'month' });
   const [activeMonths, setActiveMonths] = useState<Record<number, ActiveMonth>>({});
-  const [submissionAction, setSubmissionAction] = useState<AdminAction | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const selectedMonths = machine.months
     .filter((month) => isMonthBackfillable(month) && selectedMonthIndices.includes(orchestratorMonthIndex(month.partition)))
     .sort((left, right) => orchestratorMonthIndex(left.partition) - orchestratorMonthIndex(right.partition));
@@ -882,6 +863,17 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
   const [spec, setSpec] = useState<AdminSpec | null>(null);
   const mutationsEnabled = workflowMutationsEnabled;
   const [manifestPrefix, setManifestPrefix] = useState('');
+  const [dailyManifestPrefix, setDailyManifestPrefix] = useState('');
+  const [dailyManifestResult, setDailyManifestResult] = useState<{ manifest_prefix: string; day_count: number; month_count: number; manifests: Array<{ manifest_path: string; since: string; until: string }> } | null>(null);
+  const gapMonths = machine.months.filter((month) => month.status === 'needs_backfill' && isMonthBackfillable(month));
+  const selectedGapMonths = selectedMonths.filter((month) => month.status === 'needs_backfill');
+  const dailyTargetMonths = selectedGapMonths.length ? selectedGapMonths : gapMonths;
+  const dailyDayCount = dailyTargetMonths.reduce((count, month) => count + completedUtcDaysForMonth(month.partition), 0);
+  const dailyResultGroups = dailyManifestResult?.manifests.reduce<Record<string, typeof dailyManifestResult.manifests>>((groups, item) => {
+    const month = item.since.slice(0, 7);
+    (groups[month] ??= []).push(item);
+    return groups;
+  }, {}) ?? {};
   const [trigger, setTrigger] = useState<TriggerForm>({
     environment: 'dev',
     namespace: DEFAULT_DEV_NAMESPACE,
@@ -944,64 +936,49 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
     }
   }, [machine.machine_id]);
   useEffect(() => { void refreshActiveMonths(); }, [refreshActiveMonths]);
-  useEffect(() => {
-    if (!isTriggerPreparationActive(submissionAction) || !submissionAction?.id) return;
-    const actionId = submissionAction.id;
-    let cancelled = false;
-    let timer: number | undefined;
-    const poll = async () => {
-      try {
-        const response = await fetch(`${API_BASE}/api/admin/actions/${encodeURIComponent(actionId)}`, { cache: 'no-store' });
-        const payload = await response.json() as { action?: AdminAction; detail?: string };
-        if (!response.ok || !payload.action) throw new Error(payload.detail ?? 'Could not refresh backfill submission status.');
-        if (cancelled) return;
-        setSubmissionAction(payload.action);
-        if (payload.action.phase === 'accepted') {
-          onToast('success', `Backfill accepted for ${selectedMonthLabels.join(', ')}.`);
-          await refreshActiveMonths();
-          return;
-        }
-        if (payload.action.phase === 'failed' || payload.action.status === 'failed') {
-          const message = payload.action.error ?? 'Backfill submission failed.';
-          setError(message);
-          onToast('error', message);
-          await refreshActiveMonths();
-          return;
-        }
-      } catch {
-        // Keep polling transient status-read failures without obscuring the current phase.
-      }
-      if (!cancelled) timer = window.setTimeout(() => void poll(), 1000);
-    };
-    void poll();
-    return () => { cancelled = true; if (timer !== undefined) window.clearTimeout(timer); };
-  }, [submissionAction?.id, submissionAction?.phase, submissionAction?.status, machine.machine_id, refreshActiveMonths]);
-  const submissionActive = isTriggerPreparationActive(submissionAction);
+  // Single shared poller via the hook (no duplicate local interval). Callbacks are
+  // held in refs inside the hook so identity changes cannot restart the poll loop.
+  const { submissionAction, setSubmissionAction, submissionActive, submit: submitOrchestratedBackfill } = useOrchestratedBackfillSubmission({
+    onAccepted: async () => { await refreshActiveMonths(); },
+    onFailed: async (action) => { setError(action.error ?? 'Backfill submission failed.'); await refreshActiveMonths(); },
+    onToast,
+  });
 
   const createManifest = async () => {
-    if (!selectedMonths.length) {
+    if (machinePickMode === 'months' && !selectedMonths.length) {
       setError('Select at least one eligible month before creating manifests.');
+      return;
+    }
+    if (machinePickMode === 'range' && (!machineRangeStart || !machineRangeEnd)) {
+      setError('Pick an inclusive start and end date before creating manifests.');
       return;
     }
     setBusyAction('manifest');
     try {
+      const range = machinePickMode === 'range' && machineRangeStart && machineRangeEnd
+        ? { since: startDateToSince(machineRangeStart), until: inclusiveEndDateToExclusiveUntil(machineRangeEnd) }
+        : undefined;
+      const indices = machinePickMode === 'range' && range
+        ? machine.months.filter((month) => isMonthBackfillable(month) && monthIndicesInRange(range.since, range.until).includes(orchestratorMonthIndex(month.partition))).map((month) => orchestratorMonthIndex(month.partition))
+        : selectedMonths.map((month) => orchestratorMonthIndex(month.partition));
+      if (!indices.length) throw new Error('Select at least one eligible month or a date range that intersects online months.');
       const response = await fetch(`${API_BASE}/api/admin/manifests/orchestrated`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          machine_ids: [machine.machine_id],
-          manifest_prefix: manifestPrefix,
-          month_indices_by_machine: {
-            [machine.machine_id]: selectedMonths.map((month) => orchestratorMonthIndex(month.partition)),
-          },
-        }),
+        body: JSON.stringify(buildOrchestratedPayload({
+          machineIds: [machine.machine_id],
+          range,
+          monthIndicesByMachine: { [machine.machine_id]: indices },
+          split: machineSplit,
+          manifestPrefix,
+        })),
       });
       const result = await response.json() as { manifest?: ManifestResult; detail?: string };
       if (!response.ok || !result.manifest) throw new Error(result.detail ?? `Request failed: ${response.status}`);
       setCreatedManifest(result.manifest);
       setManifestPrefix(result.manifest.manifest_prefix ?? manifestPrefix);
       setError(null);
-      onToast('success', `Created ${result.manifest.rows} monthly manifest${result.manifest.rows === 1 ? '' : 's'} without starting a backfill.`);
+      onToast('success', `Created ${result.manifest.manifest_count ?? result.manifest.rows} manifest${(result.manifest.manifest_count ?? result.manifest.rows) === 1 ? '' : 's'} without starting a backfill.`);
     } catch (manifestError) {
       const message = manifestError instanceof Error ? manifestError.message : String(manifestError);
       setError(message);
@@ -1011,6 +988,25 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
     }
   };
 
+  const createDailyGapManifests = async () => {
+    if (!dailyTargetMonths.length || dailyDayCount > 93) return;
+    setBusyAction('daily-manifest');
+    try {
+      const response = await fetch(`${API_BASE}/api/admin/manifests/daily-gaps`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ machine_id: machine.machine_id, month_indices: dailyTargetMonths.map((month) => orchestratorMonthIndex(month.partition)), manifest_prefix: dailyManifestPrefix }),
+      });
+      const result = await response.json() as { manifest?: { manifest_prefix: string; day_count: number; month_count: number; manifests: Array<{ manifest_path: string; since: string; until: string }> }; detail?: string };
+      if (!response.ok || !result.manifest) throw new Error(result.detail ?? `Request failed: ${response.status}`);
+      setDailyManifestResult(result.manifest);
+      setError(null);
+      onToast('success', `Created ${result.manifest.day_count} daily manifests across ${result.manifest.month_count} gap months.`);
+    } catch (manifestError) {
+      const message = manifestError instanceof Error ? manifestError.message : String(manifestError);
+      setError(message); onToast('error', `Daily manifest creation failed: ${message}`);
+    } finally { setBusyAction(null); }
+  };
+
   const createAndTrigger = async () => {
     if (!mutationsEnabled) return;
     if (submissionActive) return;
@@ -1018,36 +1014,52 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
       onToast('error', 'This machine already has an active backfill. Wait for it to finish or stop it before starting another.');
       return;
     }
-    if (!selectedRanges.length) {
+    if (machinePickMode === 'months' && !selectedRanges.length) {
       setError('Select at least one eligible month before starting a backfill.');
+      return;
+    }
+    if (machinePickMode === 'range' && (!machineRangeStart || !machineRangeEnd)) {
+      setError('Pick an inclusive start and end date before starting a backfill.');
       return;
     }
     setBusyAction('trigger');
     try {
-      const response = await fetch(`${API_BASE}/api/admin/backfills/orchestrated`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          machine_ids: [machine.machine_id],
-          manifest_prefix: manifestPrefix,
-          // Use the calendar month, not the scan-relative display index. This
-          // also makes an already-open pre-fix scan safe to submit.
-          month_indices_by_machine: { [machine.machine_id]: selectedMonths.map((month) => orchestratorMonthIndex(month.partition)) },
-          params: buildTriggerParams(trigger, spec?.prod_confirmation ?? PROD_CONFIRMATION),
-        }),
-      });
-      const result = await response.json() as { action?: AdminAction; detail?: string };
-      if (!response.ok) {
-        throw new Error(result.detail ?? `Request failed: ${response.status}`);
-      }
-      if (!result.action?.id) throw new Error('The backfill request was accepted without an action ID.');
-      setSubmissionAction(result.action);
+      const range = machinePickMode === 'range' && machineRangeStart && machineRangeEnd
+        ? { since: startDateToSince(machineRangeStart), until: inclusiveEndDateToExclusiveUntil(machineRangeEnd) }
+        : undefined;
+      const indices = machinePickMode === 'range' && range
+        ? machine.months.filter((month) => isMonthBackfillable(month) && monthIndicesInRange(range.since, range.until).includes(orchestratorMonthIndex(month.partition))).map((month) => orchestratorMonthIndex(month.partition))
+        : selectedMonths.map((month) => orchestratorMonthIndex(month.partition));
+      if (!indices.length) throw new Error('Select at least one eligible month or a date range that intersects online months.');
+      await submitOrchestratedBackfill(buildOrchestratedPayload({
+        machineIds: [machine.machine_id],
+        range,
+        monthIndicesByMachine: { [machine.machine_id]: indices },
+        split: machineSplit,
+        manifestPrefix,
+        params: buildTriggerParams(trigger, spec?.prod_confirmation ?? PROD_CONFIRMATION),
+      }), `Backfill queued for ${selectedMonthLabels.join(', ') || 'selected range'}; cancel before dispatch if needed.`);
       setError(null);
-      onToast('info', `Backfill request accepted; preparing ${selectedMonthLabels.join(', ')}.`);
     } catch (triggerError) {
       const message = triggerError instanceof Error ? triggerError.message : String(triggerError); setError(message); onToast('error', message);
     } finally {
       setBusyAction(null);
+    }
+  };
+
+  const cancelPending = async () => {
+    if (!submissionAction || !canCancelBeforeSubmit(submissionAction) || cancelling) return;
+    setCancelling(true);
+    try {
+      setSubmissionAction(await cancelBackfillBeforeSubmit(submissionAction.id));
+      setError(null);
+      onToast('success', 'Backfill cancelled before Outerbounds submission.');
+    } catch (cancelError) {
+      const message = cancelError instanceof Error ? cancelError.message : String(cancelError);
+      setError(message);
+      onToast('error', message);
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -1098,7 +1110,7 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
         <div>
           <h2>Backfill This Machine</h2>
           <p className="mono">{machine.machine_id}</p>
-          <p>Creates one manifest per month and runs the ULRPM parent orchestrator sequentially against the selected target.</p>
+          <p>Creates manifests according to the selected split (full month, per day, per week, or every N days) and runs the ULRPM parent orchestrator sequentially against the selected target.</p>
         </div>
         <div className="actions">
         {hasActiveBackfill ? <button className="secondary-button danger" type="button" disabled={!mutationsEnabled || busyAction === 'terminate-parent'} title={!mutationsEnabled ? 'Workflow operations are disabled in monitor-only runtime' : undefined} onClick={() => void stopEntireBackfill()}>{busyAction === 'terminate-parent' ? <Loader2 className="spin" size={16} /> : <Square size={16} />}Stop entire backfill</button> : null}
@@ -1119,42 +1131,106 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
       {submissionAction ? <section className={`notice inline-notice trigger-progress-inline${submissionAction.phase === 'failed' ? ' failed' : ''}`} role="status" aria-live="polite">
         {submissionActive ? <Loader2 className="spin" size={17} /> : submissionAction.phase === 'failed' ? <ShieldAlert size={17} /> : <CheckCircle2 size={17} />}
         <span>Backfill {triggerPhaseLabel(submissionAction.phase)} · action {submissionAction.id}{submissionAction.error ? ` · ${submissionAction.error}` : ''}</span>
+        {canCancelBeforeSubmit(submissionAction) ? <button type="button" className="secondary-button" disabled={cancelling} onClick={() => void cancelPending()}>Cancel before dispatch</button> : null}
       </section> : null}
       <section className="panel details-panel month-selector-panel">
         <div className="panel-header">
           <div>
             <h2>Select Months to Backfill</h2>
-            <p>Choose one month, a range, or non-contiguous months. Only those month partitions are queued.</p>
+            <p>Choose months or an inclusive date range. Manifest count depends on the split below.</p>
           </div>
           <div className="month-selection-actions">
             <button className="secondary-button" type="button" disabled={hasActiveBackfill || submissionActive} onClick={() => selectMonths((month) => month.status === 'needs_backfill' && isMonthBackfillable(month))}>Select gaps</button>
             <button className="secondary-button" type="button" disabled={hasActiveBackfill || submissionActive} onClick={() => selectMonths(isMonthBackfillable)}>Select all eligible</button>
             <button className="secondary-button" type="button" onClick={() => setSelectedMonthIndices([])} disabled={selectedMonths.length === 0 || hasActiveBackfill || submissionActive}><X size={15} />Clear</button>
-            <button className="secondary-button" type="button" onClick={() => void createManifest()} disabled={selectedMonths.length === 0 || busyAction !== null || submissionActive}>
+            <button className="secondary-button" type="button" onClick={() => void createManifest()} disabled={(machinePickMode === 'months' ? selectedMonths.length === 0 : !machineRangeStart || !machineRangeEnd) || busyAction !== null || submissionActive}>
               {busyAction === 'manifest' ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
               <span>Create Manifest</span>
             </button>
-            <button className="primary-button" type="button" onClick={() => void createAndTrigger()} disabled={!mutationsEnabled || selectedMonths.length === 0 || busyAction !== null || hasActiveBackfill || submissionActive || (trigger.environment === 'prod' && !trigger.confirm_production)} title={!mutationsEnabled ? 'Workflow operations are disabled in monitor-only runtime' : hasActiveBackfill ? 'A backfill is already active for this machine' : submissionActive ? 'Backfill preparation is already in progress' : trigger.environment === 'prod' && !trigger.confirm_production ? 'Check the production confirmation checkbox to enable this run' : undefined}>
+            <button className="primary-button" type="button" onClick={() => void createAndTrigger()} disabled={!mutationsEnabled || (machinePickMode === 'months' ? selectedMonths.length === 0 : !machineRangeStart || !machineRangeEnd) || busyAction !== null || hasActiveBackfill || submissionActive || (trigger.environment === 'prod' && !trigger.confirm_production)} title={!mutationsEnabled ? 'Workflow operations are disabled in monitor-only runtime' : hasActiveBackfill ? 'A backfill is already active for this machine' : submissionActive ? 'Backfill preparation is already in progress' : trigger.environment === 'prod' && !trigger.confirm_production ? 'Check the production confirmation checkbox to enable this run' : undefined}>
               {busyAction === 'trigger' ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
-              <span>Backfill {selectedMonths.length || ''} Selected</span>
+              <span>Start monthly backfill{selectedMonths.length ? ` (${selectedMonths.length})` : ''}</span>
             </button>
           </div>
         </div>
-        <MachineDetails
+        <div className="machine-pick-mode" role="group" aria-label="Month selection mode">
+          <button type="button" className={machinePickMode === 'months' ? 'active' : ''} onClick={() => setMachinePickMode('months')}>Pick months</button>
+          <button type="button" className={machinePickMode === 'range' ? 'active' : ''} onClick={() => setMachinePickMode('range')}>Pick date range</button>
+        </div>
+        {machinePickMode === 'range' ? (
+          <BackfillRangeFields
+            startDay={machineRangeStart}
+            endDay={machineRangeEnd}
+            onStartDayChange={setMachineRangeStart}
+            onEndDayChange={setMachineRangeEnd}
+            onUntilNow={() => setMachineRangeEnd(utcToday())}
+            onClear={() => { setMachineRangeStart(''); setMachineRangeEnd(''); }}
+          />
+        ) : null}
+        <BackfillSplitSelector
+          value={machineSplit}
+          onChange={setMachineSplit}
+          sinceIso={machinePickMode === 'range' && machineRangeStart ? startDateToSince(machineRangeStart) : ''}
+          untilIso={machinePickMode === 'range' && machineRangeEnd ? inclusiveEndDateToExclusiveUntil(machineRangeEnd) : ''}
+        />
+        {machinePickMode === 'months' ? <MachineDetails
           machine={machine}
           activeMonths={activeMonths}
           backfillDisabled={hasActiveBackfill || submissionActive}
           runningMonthIndex={runningMonthIndex}
           selectedMonthIndices={selectedMonthIndices}
           onToggleBackfillMonth={(month) => { if (!isMonthBackfillable(month)) return; const index = orchestratorMonthIndex(month.partition); setSelectedMonthIndices((current) => current.includes(index) ? current.filter((item) => item !== index) : [...current, index]); }}
-        />
+        /> : <MachineDetails
+          machine={machine}
+          activeMonths={activeMonths}
+          backfillDisabled={hasActiveBackfill || submissionActive}
+          runningMonthIndex={runningMonthIndex}
+          selectedMonthIndices={machineRangeStart && machineRangeEnd ? machine.months.filter((month) => isMonthBackfillable(month) && monthIndicesInRange(startDateToSince(machineRangeStart), inclusiveEndDateToExclusiveUntil(machineRangeEnd)).includes(orchestratorMonthIndex(month.partition))).map((month) => orchestratorMonthIndex(month.partition)) : []}
+          onToggleBackfillMonth={() => undefined}
+        />}
         <section className="month-selection-summary" aria-live="polite">
           <div>
             <strong>{selectedMonths.length ? `${selectedMonths.length} month${selectedMonths.length === 1 ? '' : 's'} ready to backfill` : 'Select month cards to begin'}</strong>
-            <span>{selectedMonths.length ? `${selectedMonthLabels.join(', ')} · queues ${selectedRanges.length} sequential workflow${selectedRanges.length === 1 ? '' : 's'} and skips unselected months.` : 'Offline, not-installed, and unknown months are disabled to protect the backfill pipeline.'}</span>
+            <span>{selectedMonths.length ? `${selectedMonthLabels.join(', ')} · queues ${selectedRanges.length} sequential monthly workflow${selectedRanges.length === 1 ? '' : 's'}. Large months can exceed worker memory.` : 'Offline, not-installed, and unknown months are disabled to protect the backfill pipeline.'}</span>
           </div>
           {selectedMonths.length ? <Check size={20} aria-label="Selection ready" /> : null}
         </section>
+      </section>
+      <section className="panel daily-manifest-panel" aria-labelledby="daily-plan-title">
+        <div className="daily-manifest-heading">
+          <div>
+            <span className="daily-manifest-eyebrow">Preparation only</span>
+            <h3 id="daily-plan-title">Prepare smaller backfill windows</h3>
+            <p>Create one file per completed UTC day for this machine’s online gaps. The files are ready for a daily runner once that runner is available.</p>
+          </div>
+          <span className="daily-manifest-count">{dailyDayCount} {dailyDayCount === 1 ? 'day' : 'days'}</span>
+        </div>
+        <div className="daily-manifest-selection">
+          <strong>{selectedGapMonths.length ? 'Selected gap months' : 'All online gap months'}</strong>
+          <span>{dailyTargetMonths.length ? dailyTargetMonths.map((month) => month.partition.label).join(' · ') : 'No online gaps available'}</span>
+          {selectedGapMonths.length ? <button className="daily-manifest-text-button" type="button" onClick={() => setSelectedMonthIndices([])}>Use all gaps</button> : null}
+        </div>
+        {dailyDayCount > 93 ? <p className="daily-manifest-guidance" role="alert">This is more than 93 days. Select fewer gap months in the calendar above, then prepare the files.</p> : null}
+        <div className="daily-manifest-actions">
+          <button className="primary-button" type="button" onClick={() => void createDailyGapManifests()} disabled={!dailyDayCount || dailyDayCount > 93 || busyAction !== null || submissionActive}>
+            {busyAction === 'daily-manifest' ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
+            <span>Prepare {dailyDayCount || ''} daily files</span>
+          </button>
+          <span>No backfill starts from this action.</span>
+        </div>
+        <details className="daily-manifest-advanced">
+          <summary>Advanced: file location and execution details</summary>
+          <label>Optional storage prefix<input value={dailyManifestPrefix} onChange={(event) => setDailyManifestPrefix(event.target.value)} placeholder="Automatically generated" /></label>
+          <p>The existing “Backfill Selected” button still runs whole months. These daily files are not connected to it, so use that button only for months known to fit in memory.</p>
+        </details>
+        {dailyManifestResult ? <div className="daily-manifest-results" role="status">
+          <div className="daily-manifest-result-heading">
+            <div><strong>Daily files prepared</strong><span>{dailyManifestResult.day_count} days in {dailyManifestResult.month_count} months · no backfill started</span></div>
+            <button className="secondary-button" type="button" onClick={() => { void navigator.clipboard.writeText(dailyManifestResult.manifests.map((item) => item.manifest_path).join('\n')).then(() => onToast('success', 'Daily file paths copied.')).catch(() => onToast('error', 'Could not copy file paths.')); }}>Copy all paths</button>
+          </div>
+          <div className="daily-manifest-result-groups">{Object.entries(dailyResultGroups).map(([month, items]) => <details key={month}><summary>{month} <span>{items.length} daily files</span></summary><ol>{items.map((item) => <li key={item.manifest_path}><span>{item.since.slice(0, 10)}</span><code title={item.manifest_path}>{item.manifest_path}</code></li>)}</ol></details>)}</div>
+          <details className="daily-manifest-advanced"><summary>Storage prefix</summary><code>{dailyManifestResult.manifest_prefix}</code></details>
+        </div> : null}
       </section>
       {Object.values(activeMonths).some((item) => ['queued', 'running', 'cancel_requested', 'stopping', 'requeue_pending'].includes(item.state)) ? <section className="notice inline-notice"><Zap size={18} /><span>Backfilling: active months are locked to prevent duplicate submissions. Open the Running tab for workflow details.</span></section> : null}
         {Object.values(activeMonths).filter((item) => ['queued', 'running'].includes(item.state)).map((active) => <div className="actions" key={active.month_index}><span className={`task-phase-badge ${active.state}`}>{machine.months.find((month) => orchestratorMonthIndex(month.partition) === active.month_index)?.partition.label ?? active.month_index} · {active.state}</span>{perMonthStopsEnabled ? <button className="secondary-button danger" type="button" disabled={!mutationsEnabled || busyAction === `cancel-${active.month_index}`} onClick={() => void stopAndRequeue(active)}>{busyAction === `cancel-${active.month_index}` ? <Loader2 className="spin" size={16} /> : <Square size={16} />}Stop month</button> : null}{active.parent_workflow_id ? <a className="icon-link" href={`${OUTERBOUNDS_BASE}?flow_id=UlrpmDevBackfillOrchestratorFlow`} target="_blank" rel="noreferrer" title={`Open ${active.parent_workflow_id} in Outerbounds`}><ExternalLink size={16} /></a> : null}</div>)}
@@ -1207,6 +1283,8 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [triggerSubmitting, setTriggerSubmitting] = useState(false);
   const [triggerSubmission, setTriggerSubmission] = useState<AdminAction | null>(null);
+  const [triggerCancelling, setTriggerCancelling] = useState(false);
+  const triggerRequestInFlight = useRef(false);
   const refreshedTriggerActionId = useRef<string | null>(null);
   const [manifest, setManifest] = useState<MachineManifestForm>({
     machine_id: '',
@@ -1260,6 +1338,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
   const [backfillScope, setBackfillScope] = useState<BackfillScope>('one');
   const [clearedRunnerPlanKey, setClearedRunnerPlanKey] = useState('');
   const [runnerMonthMode, setRunnerMonthMode] = useState<'range' | 'gaps' | 'all' | 'manual'>('gaps');
+  const [runnerSplit, setRunnerSplit] = useState<SplitSpec>({ mode: 'month' });
   const [manualMonthIndices, setManualMonthIndices] = useState<number[]>([]);
   const [parallelMachineRuns, setParallelMachineRuns] = useState(false);
   const [adminView, setAdminView] = useState<AdminView>('overview');
@@ -1293,7 +1372,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
     try {
       const [loadedSpec, loadedActions, loadedReadiness, machinesData, statusData] = await Promise.all([
         getCachedJson<AdminSpec>('admin-spec', `${API_BASE}/api/admin/spec`, 30 * 60_000, force),
-        getCachedJson<{ actions: AdminAction[] }>('admin-actions', `${API_BASE}/api/admin/actions`, 60_000, force),
+        getCachedJson<{ actions: AdminAction[] }>('admin-actions', `${API_BASE}/api/admin/actions`, 60_000, true),
         getCachedJson<AdminReadiness>('admin-readiness', `${API_BASE}/api/admin/readiness`, 5 * 60_000, force),
         getCachedJson<{ machine_ids: string[] }>('fullrlbl-machines', `${API_BASE}/api/admin/fullrlbl/machines`, 30 * 60_000, force),
         getCachedJson<StatusPayload>('runner-machines', `${API_BASE}/api/backfill/status`, 60_000, force),
@@ -1303,7 +1382,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
       setSpec(loadedSpec);
       setActions(loadedActions.actions);
       const pendingTrigger = loadedActions.actions.find((action) =>
-        action.action === 'trigger' && ['queued', 'validating', 'preparing_manifests', 'submitting'].includes(action.phase ?? ''),
+        action.action === 'trigger' && isTriggerPreparationActive(action),
       );
       if (pendingTrigger) setTriggerSubmission(pendingTrigger);
       setAdminReadiness(loadedReadiness);
@@ -1374,39 +1453,27 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
     }
   }, []);
 
+  const loadAdminRef = useRef(loadAdmin);
+  loadAdminRef.current = loadAdmin;
+  const triggerPollActionId = isTriggerPreparationActive(triggerSubmission) ? triggerSubmission?.id ?? null : null;
   useEffect(() => {
-    const actionId = triggerSubmission?.id;
-    if (!actionId || !['queued', 'validating', 'preparing_manifests', 'submitting'].includes(triggerSubmission?.phase ?? '')) return;
-    let cancelled = false;
-    let timer: number | undefined;
-    const poll = async () => {
-      try {
-        const response = await fetch(`${API_BASE}/api/admin/actions/${encodeURIComponent(actionId)}`, { cache: 'no-store' });
-        const payload = await response.json() as { action?: AdminAction; detail?: string };
-        if (!response.ok || !payload.action) throw new Error(payload.detail ?? `Could not refresh trigger status (${response.status})`);
-        if (cancelled) return;
-        const action = payload.action;
-        setTriggerSubmission(action);
-        const isTerminal = ['accepted', 'failed'].includes(action.phase ?? '') || ['failed', 'succeeded'].includes(action.status);
-        if (isTerminal) {
-          if (action.phase === 'failed' || action.status === 'failed') setAdminError(action.error ?? 'Backfill submission failed.');
-          if (refreshedTriggerActionId.current !== actionId) {
-            refreshedTriggerActionId.current = actionId;
-            void loadAdmin();
-          }
-          return;
+    if (!triggerPollActionId) return;
+    return startAdminActionPoll(triggerPollActionId, {
+      onUpdate: (action) => setTriggerSubmission(action),
+      onFailed: (action) => {
+        setAdminError(action.error ?? 'Backfill submission failed.');
+      },
+      onTerminal: (action) => {
+        if (action.phase === 'failed' || action.status === 'failed') {
+          setAdminError(action.error ?? 'Backfill submission failed.');
         }
-      } catch (error) {
-        if (!cancelled) setAdminError(error instanceof Error ? error.message : String(error));
-      }
-      if (!cancelled) timer = window.setTimeout(() => void poll(), 1000);
-    };
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [triggerSubmission?.id, triggerSubmission?.phase, triggerSubmission?.status, loadAdmin]);
+        if (refreshedTriggerActionId.current !== triggerPollActionId) {
+          refreshedTriggerActionId.current = triggerPollActionId;
+          void loadAdminRef.current();
+        }
+      },
+    });
+  }, [triggerPollActionId]);
 
   // The machine picker is also used by the older forms below, so obtain the
   // authoritative per-machine lock state once for the whole admin view.
@@ -1457,7 +1524,12 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
     let reconnectTimer: number | undefined;
     let closedByViewChange = false;
     const connect = () => {
-      socket = new WebSocket(workflowSocketUrl());
+      try {
+        socket = new WebSocket(workflowSocketUrl());
+      } catch (error) {
+        setAdminError(`Live workflow connection could not be opened: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
       socket.onmessage = (event) => {
         try {
           const summary = JSON.parse(event.data) as WorkflowSummaryPayload;
@@ -1487,7 +1559,11 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
       return;
     }
     const isQueuedBackfillTrigger = path === '/api/admin/backfills/orchestrated' || path === '/api/admin/backfills/all';
-    if (isQueuedBackfillTrigger) setTriggerSubmitting(true);
+    if (isQueuedBackfillTrigger) {
+      if (triggerRequestInFlight.current || isTriggerPreparationActive(triggerSubmission)) return;
+      triggerRequestInFlight.current = true;
+      setTriggerSubmitting(true);
+    }
     setBusyAction(label);
     try {
       const response = await fetch(`${API_BASE}${path}`, {
@@ -1505,7 +1581,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
         refreshedTriggerActionId.current = null;
         setTriggerSubmission(action);
         setAdminError(null);
-        onToast('info', `Backfill request accepted (${action.id.slice(0, 8)}); preparation is starting.`);
+        onToast('info', `Backfill queued (${action.id.slice(0, 8)}); cancel before dispatch if needed.`);
         return;
       }
       await loadAdmin();
@@ -1517,7 +1593,26 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
       onToast('error', `${label} failed: ${msg}`);
     } finally {
       setBusyAction(null);
-      if (isQueuedBackfillTrigger) setTriggerSubmitting(false);
+      if (isQueuedBackfillTrigger) {
+        triggerRequestInFlight.current = false;
+        setTriggerSubmitting(false);
+      }
+    }
+  };
+
+  const cancelPendingTrigger = async () => {
+    if (!triggerSubmission || !canCancelBeforeSubmit(triggerSubmission) || triggerCancelling) return;
+    setTriggerCancelling(true);
+    try {
+      setTriggerSubmission(await cancelBackfillBeforeSubmit(triggerSubmission.id));
+      setAdminError(null);
+      onToast('success', 'Backfill cancelled before Outerbounds submission.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAdminError(message);
+      onToast('error', message);
+    } finally {
+      setTriggerCancelling(false);
     }
   };
 
@@ -1608,14 +1703,16 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
       onToast('error', 'This machine already has an active backfill. Stop it or wait for it to finish before starting another.');
       return;
     }
-    await submitAdmin('/api/admin/backfills/orchestrated', {
-      machine_ids: runnerSelection ? Object.keys(runnerMonthPlan) : [manifest.machine_id],
-      since: manifest.since,
-      until: manifest.until,
-      manifest_prefix: manifest.manifest_path,
-      month_indices_by_machine: runnerSelection ? runnerMonthPlan : {},
+    await submitAdmin('/api/admin/backfills/orchestrated', buildOrchestratedPayload({
+      machineIds: runnerSelection ? Object.keys(runnerMonthPlan) : [manifest.machine_id],
+      range: runnerSelection
+        ? { since: runnerSince, until: runnerUntil }
+        : { since: manifest.since, until: manifest.until },
+      monthIndicesByMachine: runnerSelection ? runnerMonthPlan : {},
+      split: runnerSplit,
+      manifestPrefix: manifest.manifest_path,
       params: buildTriggerParams({ ...trigger, max_parallel_steps: 1 }, productionConfirmation),
-    }, 'ULRPM orchestrator');
+    }), 'ULRPM orchestrator');
   };
 
   const createMultiManifestAndTrigger = async (runnerSelection = false) => {
@@ -1628,14 +1725,16 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
       onToast('error', 'At least one selected machine already has an active backfill. Remove it from this run, or stop/wait for its current backfill.');
       return;
     }
-    await submitAdmin('/api/admin/backfills/orchestrated', {
-      machine_ids: machineIds,
-      since: multiManifest.since,
-      until: multiManifest.until,
-      manifest_prefix: multiManifest.manifest_path,
-      month_indices_by_machine: runnerSelection ? runnerMonthPlan : {},
+    await submitAdmin('/api/admin/backfills/orchestrated', buildOrchestratedPayload({
+      machineIds,
+      range: runnerSelection
+        ? { since: runnerSince, until: runnerUntil }
+        : { since: multiManifest.since, until: multiManifest.until },
+      monthIndicesByMachine: runnerSelection ? runnerMonthPlan : {},
+      split: runnerSplit,
+      manifestPrefix: multiManifest.manifest_path,
       params: buildTriggerParams({ ...trigger, max_parallel_steps: runnerSelection ? runnerConcurrency : trigger.max_parallel_steps }, productionConfirmation),
-    }, `scoped backfill for ${machineIds.length} machine${machineIds.length === 1 ? '' : 's'}`);
+    }), `scoped backfill for ${machineIds.length} machine${machineIds.length === 1 ? '' : 's'}`);
   };
 
   const createRunnerManifests = async () => {
@@ -1650,13 +1749,13 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
       const response = await fetch(`${API_BASE}/api/admin/manifests/orchestrated`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          machine_ids: plannedMachineIds,
-          since: runnerSince,
-          until: runnerUntil,
-          manifest_prefix: manifestPrefix,
-          month_indices_by_machine: runnerMonthPlan,
-        }),
+        body: JSON.stringify(buildOrchestratedPayload({
+          machineIds: plannedMachineIds,
+          range: { since: runnerSince, until: runnerUntil },
+          monthIndicesByMachine: runnerMonthPlan,
+          split: runnerSplit,
+          manifestPrefix,
+        })),
       });
       const result = await response.json() as { manifest?: ManifestResult; machine_count?: number; detail?: string };
       if (!response.ok || !result.manifest) throw new Error(result.detail ?? `Request failed: ${response.status}`);
@@ -1667,7 +1766,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
       setCreatedManifest(result.manifest);
       await loadAdmin();
       setAdminError(null);
-      onToast('success', `Created ${result.manifest.rows} monthly manifest${result.manifest.rows === 1 ? '' : 's'} for ${result.machine_count ?? plannedMachineIds.length} machine${(result.machine_count ?? plannedMachineIds.length) === 1 ? '' : 's'} without starting a backfill.`);
+      onToast('success', `Created ${result.manifest.manifest_count ?? result.manifest.rows} manifest${(result.manifest.manifest_count ?? result.manifest.rows) === 1 ? '' : 's'} for ${result.machine_count ?? plannedMachineIds.length} machine${(result.machine_count ?? plannedMachineIds.length) === 1 ? '' : 's'} without starting a backfill.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setAdminError(message);
@@ -1694,17 +1793,22 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
     }
     await submitAdmin(
       runnerSelection ? '/api/admin/backfills/orchestrated' : '/api/admin/backfills/all',
-      {
-        ...(runnerSelection ? {} : { source }),
-        params: buildTriggerParams({ ...trigger, max_parallel_steps: runnerSelection ? runnerConcurrency : trigger.max_parallel_steps }, productionConfirmation),
-        ...(runnerSelection ? {
-          machine_ids: targetMachineIds,
-          since: runnerSince,
-          until: runnerUntil,
-          manifest_prefix: allMachines.manifest_path,
-        } : allMachines),
-        month_indices_by_machine: runnerSelection ? runnerMonthPlan : {},
-      },
+      runnerSelection
+        ? buildOrchestratedPayload({
+          machineIds: targetMachineIds,
+          range: { since: runnerSince, until: runnerUntil },
+          monthIndicesByMachine: runnerMonthPlan,
+          split: runnerSplit,
+          manifestPrefix: allMachines.manifest_path,
+          params: buildTriggerParams({ ...trigger, max_parallel_steps: runnerConcurrency }, productionConfirmation),
+        })
+        : {
+          source,
+          params: buildTriggerParams({ ...trigger, max_parallel_steps: trigger.max_parallel_steps }, productionConfirmation),
+          ...allMachines,
+          month_indices_by_machine: {},
+          split: runnerSplit,
+        },
       'All-machines backfill',
     );
   };
@@ -1769,8 +1873,10 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
   const selectedRunnerMachineIds = backfillScope === 'one'
     ? (manifest.machine_id ? [manifest.machine_id] : [])
     : backfillScope === 'selected' ? parseMachineIds(multiManifest.machine_ids) : runnerMachines.map((machine) => machine.machine_id);
-  const runnerSince = backfillScope === 'one' ? manifest.since : backfillScope === 'selected' ? multiManifest.since : allMachines.since;
-  const runnerUntil = backfillScope === 'one' ? manifest.until : backfillScope === 'selected' ? multiManifest.until : allMachines.until;
+  const runnerStartDay = dateOnlyValue(backfillScope === 'one' ? manifest.since : backfillScope === 'selected' ? multiManifest.since : allMachines.since);
+  const runnerEndDay = dateOnlyValue(backfillScope === 'one' ? manifest.until : backfillScope === 'selected' ? multiManifest.until : allMachines.until);
+  const runnerSince = runnerMonthMode === 'range' && runnerStartDay ? startDateToSince(runnerStartDay) : '';
+  const runnerUntil = runnerMonthMode === 'range' && runnerEndDay ? inclusiveEndDateToExclusiveUntil(runnerEndDay) : '';
   const computedRunnerMonthSelection = buildRunnerMonthSelection(
     runnerMachines, selectedRunnerMachineIds, runnerMonthMode, runnerSince, runnerUntil, manualMonthIndices,
   );
@@ -1825,7 +1931,8 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
   }))].sort();
   const plannedPartitionCount = Object.values(runnerMonthPlan).reduce((sum, months) => sum + months.length, 0);
   const setRunnerRange = (field: 'since' | 'until', value: string) => {
-    const normalized = field === 'until' && value === utcToday() ? new Date().toISOString() : value;
+    // Store plain YYYY-MM-DD days; exclusive until mapping happens in runnerSince/runnerUntil.
+    const normalized = value.includes('T') ? value.slice(0, 10) : value;
     if (backfillScope === 'one') setManifest({ ...manifest, [field]: normalized });
     else if (backfillScope === 'selected') setMultiManifest({ ...multiManifest, [field]: normalized });
     else setAllMachines({ ...allMachines, [field]: normalized });
@@ -1834,6 +1941,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
   const productionConfirmation = spec?.prod_confirmation ?? PROD_CONFIRMATION;
   const productionConfirmed = trigger.environment !== 'prod' || trigger.confirm_production;
   const runnerSubmitBlockers = [
+    ...(triggerSubmitting || isTriggerPreparationActive(triggerSubmission) ? ['A backfill submission is already in progress.'] : []),
     ...(!workflowMutationsEnabled ? ['Workflow operations are disabled in monitor-only runtime.'] : []),
     ...(busyAction !== null ? ['Another admin action is still in progress.'] : []),
     ...(adminReadiness === null ? ['Platform readiness checks are still loading.'] : []),
@@ -1846,10 +1954,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
     ...(!productionConfirmed ? ['Check the production confirmation checkbox to enable this run.'] : []),
   ];
   const runnerSubmitDisabled = runnerSubmitBlockers.length > 0;
-  const triggerSubmissionIsTerminal = Boolean(triggerSubmission && (
-    ['accepted', 'failed'].includes(triggerSubmission.phase ?? '')
-    || ['failed', 'succeeded'].includes(triggerSubmission.status)
-  ));
+  const triggerSubmissionIsTerminal = isAdminActionTerminal(triggerSubmission);
   const triggerSubmissionActive = triggerSubmitting || Boolean(triggerSubmission && !triggerSubmissionIsTerminal);
   const toggleRunnerMachine = (machineId: string, checked: boolean) => {
     if (backfillScope === 'all') return;
@@ -1874,11 +1979,13 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
       <div className="trigger-progress-copy">
         <strong>{triggerSubmitting ? 'Submitting backfill request…' : `Backfill ${triggerPhaseLabel(triggerSubmission?.phase)}`}</strong>
         <span>{triggerSubmission?.id ? `Action ${triggerSubmission.id}${triggerSubmission.machine_ids?.length ? ` · ${triggerSubmission.machine_ids.length} machine${triggerSubmission.machine_ids.length === 1 ? '' : 's'}` : ''}` : 'The server is accepting the request.'}</span>
+        {triggerSubmission?.phase === 'cancel_window' ? <span>The 15-second cancellation window is active. No request reaches Outerbounds during it.</span> : null}
         {triggerSubmission?.error ? <span className="error-text">{triggerSubmission.error}</span> : null}
       </div>
-      {triggerSubmissionIsTerminal ? <button type="button" className="icon-button" onClick={() => setTriggerSubmission(null)} aria-label="Dismiss backfill submission status" title="Dismiss status"><X size={16} /></button> : <span className="trigger-progress-phase">{triggerSubmission?.phase ?? 'sending'}</span>}
+      {canCancelBeforeSubmit(triggerSubmission) ? <button type="button" className="secondary-button" disabled={triggerCancelling} onClick={() => void cancelPendingTrigger()}>Cancel before dispatch</button> : triggerSubmissionIsTerminal ? <button type="button" className="icon-button" onClick={() => setTriggerSubmission(null)} aria-label="Dismiss backfill submission status" title="Dismiss status"><X size={16} /></button> : <span className="trigger-progress-phase">{triggerSubmission?.phase ?? 'sending'}</span>}
     </section> : null}
-    <div className={`admin-workspace${adminSidebarOpen ? '' : ' sidebar-collapsed'}`} data-admin-view={adminView} inert={triggerSubmissionActive ? true : undefined}>
+    <fieldset className="admin-workspace-controls" disabled={triggerSubmissionActive}>
+    <div className={`admin-workspace${adminSidebarOpen ? '' : ' sidebar-collapsed'}`} data-admin-view={adminView}>
       <aside className="admin-sidebar" aria-label="Admin categories">
         <div className="admin-sidebar-brand"><Terminal size={18} /><span>Admin workspace</span><button className="admin-sidebar-toggle" type="button" onClick={() => setAdminSidebarOpen((open) => !open)} title={adminSidebarOpen ? 'Hide admin sidebar' : 'Show admin sidebar'} aria-label={adminSidebarOpen ? 'Hide admin sidebar' : 'Show admin sidebar'}>{adminSidebarOpen ? <ChevronLeft size={17} /> : <ChevronRight size={17} />}</button></div>
         <nav className="admin-sidebar-nav">
@@ -2031,11 +2138,12 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
           )}
           <section className="wide runner-machine-picker" aria-label="Machine selection">
             <div className="runner-machine-picker-head"><div><strong>{runnerMachinesLoading ? 'Loading machine inventory…' : backfillScope === 'all' ? `All ${runnerMachines.length} inventory machines included` : `${selectedRunnerMachineIds.length} machine${selectedRunnerMachineIds.length === 1 ? '' : 's'} selected`}</strong><span>Machines with an active backfill are locked to prevent a second parent workflow.</span></div><div className="runner-machine-picker-controls"><button className="icon-button" type="button" onClick={() => void loadRunnerBusyStatus(true)} title="Refresh backfill status for all machines" aria-label="Refresh backfill status" disabled={runnerBusyLoading}><RefreshCw className={runnerBusyLoading ? 'spin' : ''} size={15} /></button><input value={runnerMachineQuery} onChange={(event) => setRunnerMachineQuery(event.target.value)} placeholder="Filter machine ID" aria-label="Filter machines" disabled={runnerMachinesLoading} /></div></div>
-            <div className="runner-machine-table"><table><thead><tr><th><input type="checkbox" aria-label="Select all eligible visible machines" checked={selectableVisibleRunnerMachines.length > 0 && selectableVisibleRunnerMachines.every((machine) => selectedRunnerMachineIds.includes(machine.machine_id))} disabled={runnerLockStatusLoading || backfillScope === 'one' || backfillScope === 'all' || selectableVisibleRunnerMachines.length === 0} onChange={(event) => setMultiManifest({ ...multiManifest, machine_ids: (event.target.checked ? selectableVisibleRunnerMachines.map((machine) => machine.machine_id) : []).join('\n') })} /></th><th>Machine</th><th>Status</th><th>Coverage</th><th>Backfill</th></tr></thead><tbody>{runnerMachinesLoading ? <tr className="runner-machine-loading"><td colSpan={5}><div className="runner-machine-loading-content"><Loader2 className="spin" size={20} /><span>Loading machine inventory…</span></div></td></tr> : visibleRunnerMachines.length === 0 ? <tr><td colSpan={5} className="empty-state">No machines match this filter.</td></tr> : visibleRunnerMachines.map((machine) => { const locked = runnerMachineIsLocked(machine.machine_id); const busyTitle = runnerBusyLabel(machine.machine_id); return <tr key={machine.machine_id} className={locked ? 'backfill-active' : undefined}><td><input type="checkbox" checked={selectedRunnerMachineIds.includes(machine.machine_id)} disabled={runnerLockStatusLoading || backfillScope === 'all' || locked} onChange={(event) => toggleRunnerMachine(machine.machine_id, event.target.checked)} aria-label={`Select ${machine.machine_id}`} /></td><td className="mono">{machine.machine_id} <TestMachineBadge isTest={machine.is_test_machine} /></td><td><StatusPill status={machine.status} /></td><td>{machine.months_complete}/{machine.months_expected}</td><td>{runnerLockStatusLoading ? <span className="text-muted">Checking…</span> : locked ? <span className="task-phase-badge failed" title={busyTitle || 'Active backfill'}>Busy</span> : <span className="text-ok">Ready</span>}</td></tr>; })}</tbody></table></div>
+            <div className="runner-machine-table"><table><thead><tr><th><input type="checkbox" aria-label="Select all eligible visible machines" checked={selectableVisibleRunnerMachines.length > 0 && selectableVisibleRunnerMachines.every((machine) => selectedRunnerMachineIds.includes(machine.machine_id))} disabled={runnerLockStatusLoading || backfillScope === 'one' || backfillScope === 'all' || selectableVisibleRunnerMachines.length === 0} onChange={(event) => setMultiManifest({ ...multiManifest, machine_ids: (event.target.checked ? selectableVisibleRunnerMachines.map((machine) => machine.machine_id) : []).join('\n') })} /></th><th>Machine</th><th>Status</th><th>Coverage</th><th>Backfill</th></tr></thead><tbody>{runnerMachinesLoading ? <tr className="runner-machine-loading"><td colSpan={5}><div className="runner-machine-loading-content"><Loader2 className="spin" size={20} /><span>Loading machine inventory…</span></div></td></tr> : visibleRunnerMachines.length === 0 ? <tr><td colSpan={5} className="empty-state">No machines match this filter.</td></tr> : visibleRunnerMachines.map((machine) => { const locked = runnerMachineIsLocked(machine.machine_id); const busyTitle = runnerBusyLabel(machine.machine_id); const displayName = machine.display_name && machine.display_name !== machine.machine_id ? machine.display_name : machine.machine_id; return <tr key={machine.machine_id} className={locked ? 'backfill-active' : undefined}><td><input type="checkbox" checked={selectedRunnerMachineIds.includes(machine.machine_id)} disabled={runnerLockStatusLoading || backfillScope === 'all' || locked} onChange={(event) => toggleRunnerMachine(machine.machine_id, event.target.checked)} aria-label={`Select ${machine.machine_id}`} /></td><td><span className="machine-identity-label">{displayName}{displayName !== machine.machine_id ? <small className="mono machine-identity-id">{machine.machine_id}</small> : null}</span><TestMachineBadge isTest={machine.is_test_machine} /></td><td><StatusPill status={machine.status} /></td><td>{machine.months_complete}/{machine.months_expected}</td><td>{runnerLockStatusLoading ? <span className="text-muted">Checking…</span> : locked ? <span className="task-phase-badge failed" title={busyTitle || 'Active backfill'}>Busy</span> : <span className="text-ok">Ready</span>}</td></tr>; })}</tbody></table></div>
           </section>
           <section className="wide month-plan-picker" aria-label="Months to backfill"><div className="month-plan-picker-head"><div><strong>Months to backfill</strong><span>Every plan includes only online months with a backfillable status.</span></div></div><div className="month-plan-modes">{(['gaps', 'range', 'all', 'manual'] as const).map((mode) => <button key={mode} className={runnerMonthMode === mode ? 'active' : ''} type="button" onClick={() => { setRunnerMonthMode(mode); setClearedRunnerPlanKey(''); if (mode === 'gaps' || mode === 'all') void selectRunnerMonths(); }}><strong>{{ gaps: 'Fill detected gaps', range: 'Choose a date range', all: 'All months', manual: 'Pick individual months' }[mode]}</strong><span>{{ gaps: 'Online missing partitions only', range: 'Online partitions intersecting dates', all: 'Online needs-backfill or backfilled months', manual: 'Per-machine online month selection' }[mode]}</span></button>)}</div></section>
           {runnerMonthMode === 'gaps' ? <section className="wide runner-month-feedback"><div><strong>{plannedPartitionCount ? `${plannedPartitionCount} gap partition${plannedPartitionCount === 1 ? '' : 's'} selected` : 'No online gaps selected'}</strong><span>{plannedMonthLabels.length ? plannedMonthLabels.join(', ') : 'Select machines with online gaps, then refresh.'}</span>{runnerMonthSelection.skippedCount ? <span>{runnerMonthSelection.skippedCount} non-online or unavailable machine-months skipped.</span> : null}</div><div className="actions"><button className="secondary-button" type="button" onClick={() => void selectRunnerMonths()}>Refresh gaps</button><button className="secondary-button" type="button" onClick={() => setClearedRunnerPlanKey(computedRunnerMonthPlanKey)} disabled={!plannedPartitionCount}>Clear</button></div></section> : null}
-          {runnerMonthMode === 'range' ? <section className="wide runner-range-picker"><div className="runner-range-picker-head"><div><strong>Choose a calendar range</strong><span>Only online/backfillable months intersecting this range are planned.</span></div><strong>{rangePartitionCount} partitions planned</strong></div><div className="runner-date-fields"><label onClick={(event) => event.currentTarget.querySelector('input')?.showPicker()}><span>Start date <CalendarDays size={15} /></span><input type="date" max={utcToday()} value={dateOnlyValue(runnerSince)} onFocus={(event) => event.currentTarget.showPicker()} onChange={(event) => setRunnerRange('since', event.target.value)} aria-label="Start date calendar" /></label><label onClick={(event) => event.currentTarget.querySelector('input')?.showPicker()}><span>End date <CalendarDays size={15} /></span><input type="date" max={utcToday()} value={dateOnlyValue(runnerUntil)} onFocus={(event) => event.currentTarget.showPicker()} onChange={(event) => setRunnerRange('until', event.target.value)} aria-label="End date calendar" /></label></div>{runnerMonthSelection.skippedCount ? <p className="text-muted">{runnerMonthSelection.skippedCount} non-online or unavailable machine-months skipped.</p> : null}<div className="actions"><button className="secondary-button" type="button" onClick={() => setRunnerRange('until', new Date().toISOString())}>Until now</button><button className="secondary-button" type="button" onClick={() => { setRunnerRange('since', ''); setRunnerRange('until', ''); }}>Clear dates</button></div></section> : null}
+          {runnerMonthMode === 'range' ? <section className="wide runner-range-picker"><div className="runner-range-picker-head"><div><strong>Choose a calendar range</strong><span>Only online/backfillable months intersecting this range are planned. End date is inclusive.</span></div><strong>{rangePartitionCount} partitions planned</strong></div><BackfillRangeFields startDay={runnerStartDay} endDay={runnerEndDay} onStartDayChange={(day) => setRunnerRange('since', day)} onEndDayChange={(day) => setRunnerRange('until', day)} onUntilNow={() => setRunnerRange('until', utcToday())} onClear={() => { setRunnerRange('since', ''); setRunnerRange('until', ''); }} />{runnerMonthSelection.skippedCount ? <p className="text-muted">{runnerMonthSelection.skippedCount} non-online or unavailable machine-months skipped.</p> : null}</section> : null}
+          <BackfillSplitSelector value={runnerSplit} onChange={setRunnerSplit} sinceIso={runnerSince} untilIso={runnerUntil} />
           {runnerMonthMode === 'all' ? <section className="wide runner-month-feedback"><div><strong>{plannedPartitionCount ? `${plannedPartitionCount} online eligible partitions selected` : 'No online eligible months'}</strong><span>{plannedMonthLabels.length ? plannedMonthLabels.join(', ') : 'Select machines to calculate online months.'}</span>{runnerMonthSelection.skippedCount ? <span>{runnerMonthSelection.skippedCount} non-online or unavailable machine-months skipped.</span> : null}</div><div className="actions"><button className="secondary-button" type="button" onClick={() => void selectRunnerMonths()}>Refresh all months</button><button className="secondary-button" type="button" onClick={() => setClearedRunnerPlanKey(computedRunnerMonthPlanKey)} disabled={!plannedPartitionCount}>Clear</button></div></section> : null}
           {runnerMonthMode === 'manual' ? <RunnerMonthCards selected={manualMonthIndices} availability={runnerMonthSelection.availability} machineCount={selectedRunnerMachineIds.length} skippedCount={runnerMonthSelection.skippedCount} onChange={setManualMonthIndices} /> : null}
           {backfillScope === 'one' ? (
@@ -2592,6 +2700,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
       </section>
       </div>
     </div>
+    </fieldset>
     </>
   );
 }
@@ -3149,9 +3258,50 @@ function labelForStatus(status: BackfillStatus | 'all') {
     .join(' ');
 }
 
+const machineCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function sortCoverageMachines(machines: MachineStatus[], key: MachineSortKey, direction: 'asc' | 'desc') {
+  const valueFor = (machine: MachineStatus): string | number | null => {
+    switch (key) {
+      case 'machine': return machine.display_name || machine.machine_id;
+      case 'status': return labelForStatus(machine.status);
+      case 'coverage': return machine.months_expected ? machine.months_complete / machine.months_expected : null;
+      case 'installed': return machine.installation_at ? Date.parse(machine.installation_at) : null;
+      case 'activity': return machine.online_months ?? 0;
+      case 'first_gap': return machine.first_missing_month ?? null;
+      case 'rows': return machine.production_rows;
+    }
+  };
+  return [...machines].sort((left, right) => {
+    const a = valueFor(left);
+    const b = valueFor(right);
+    if (a === null || Number.isNaN(a)) return b === null || Number.isNaN(b) ? machineCollator.compare(left.machine_id, right.machine_id) : 1;
+    if (b === null || Number.isNaN(b)) return -1;
+    let comparison = typeof a === 'number' && typeof b === 'number' ? a - b : machineCollator.compare(String(a), String(b));
+    if (!comparison && key === 'activity') comparison = (left.offline_months ?? 0) - (right.offline_months ?? 0);
+    return comparison ? comparison * (direction === 'asc' ? 1 : -1) : machineCollator.compare(left.machine_id, right.machine_id);
+  });
+}
+
+function csvCell(value: string) {
+  // Spreadsheet programs can interpret imported text as a formula.
+  const safe = /^[\s]*[=+\-@]/.test(value) ? `'${value}` : value;
+  return `"${safe.replaceAll('"', '""')}"`;
+}
+
+function quickMachineHref(machineId: string) {
+  const url = new URL(window.location.href);
+  url.searchParams.delete('machine');
+  url.searchParams.delete('view');
+  url.searchParams.set('quick', machineId);
+  return url.toString();
+}
+
 function triggerPhaseLabel(phase?: string) {
   const labels: Record<string, string> = {
     queued: 'queued',
+    cancel_window: 'waiting for cancellation window',
+    cancelled: 'cancelled before dispatch',
     validating: 'validating machine data',
     preparing_manifests: 'preparing manifests',
     submitting: 'submitting to Outerbounds',
@@ -3162,7 +3312,18 @@ function triggerPhaseLabel(phase?: string) {
 }
 
 function isTriggerPreparationActive(action: AdminAction | null | undefined) {
-  return Boolean(action && ['queued', 'validating', 'preparing_manifests', 'submitting'].includes(action.phase ?? ''));
+  return Boolean(action && ['queued', 'cancel_window', 'validating', 'preparing_manifests', 'submitting'].includes(action.phase ?? ''));
+}
+
+function canCancelBeforeSubmit(action: AdminAction | null | undefined) {
+  return Boolean(action && action.status === 'queued' && ['queued', 'cancel_window', 'validating', 'preparing_manifests'].includes(action.phase ?? ''));
+}
+
+async function cancelBackfillBeforeSubmit(actionId: string): Promise<AdminAction> {
+  const response = await fetch(`${API_BASE}/api/admin/actions/${encodeURIComponent(actionId)}/cancel-before-submit`, { method: 'POST' });
+  const result = await response.json() as { action?: AdminAction; detail?: string };
+  if (!response.ok || !result.action) throw new Error(result.detail ?? `Cancellation failed: ${response.status}`);
+  return result.action;
 }
 
 function activityForMonth(month: MonthStatus) {
@@ -3282,18 +3443,20 @@ function isMonthBackfillable(month: MonthStatus) {
   return activity === 'online' && (month.status === 'needs_backfill' || month.status === 'backfilled');
 }
 
+function completedUtcDaysForMonth(partition: MonthStatus['partition']) {
+  const start = Date.UTC(partition.year, partition.month - 1, 1);
+  const end = Math.min(Date.UTC(partition.year, partition.month, 1), Date.now());
+  const completedEnd = Math.min(end, Math.floor(Date.now() / 86_400_000) * 86_400_000);
+  return Math.max(0, Math.floor((completedEnd - start) / 86_400_000));
+}
+
 function runnerCalendarMonthsInRange(since: string, until: string): number[] {
+  // since/until here are already exclusive-bound ISO strings from runnerSince/runnerUntil in range mode.
+  if (since.includes('T') && until.includes('T')) return monthIndicesInRange(since, until);
   const sinceDay = dateOnlyValue(since);
   const untilDay = dateOnlyValue(until);
   if (!sinceDay || !untilDay) return [];
-  const start = new Date(`${sinceDay}T00:00:00`).getTime();
-  const end = new Date(`${untilDay}T23:59:59`).getTime();
-  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return [];
-  return orchestratorMonthsThroughToday().filter(({ year, month }) => {
-    const monthStart = new Date(year, month - 1, 1).getTime();
-    const nextMonthStart = new Date(year, month, 1).getTime();
-    return monthStart <= end && nextMonthStart > start;
-  }).map(({ index }) => index);
+  return monthIndicesInRange(startDateToSince(sinceDay), inclusiveEndDateToExclusiveUntil(untilDay));
 }
 
 function buildRunnerMonthSelection(
@@ -3374,18 +3537,6 @@ function backfillRangesForMonths(months: MonthStatus[]) {
       until: backfillMonthUntil(last.year, last.month),
     };
   });
-}
-
-function defaultBackfillRange(machine: MachineStatus) {
-  const month = machine.months.find((candidate) => candidate.status === 'needs_backfill' && isMonthBackfillable(candidate))
-    ?? machine.months.find(isMonthBackfillable);
-  if (!month) return null;
-  const year = month.partition.year;
-  const monthValue = month.partition.month;
-  return {
-    since: `${year}-${String(monthValue).padStart(2, '0')}-01T00:00:00`,
-    until: backfillMonthUntil(year, monthValue),
-  };
 }
 
 export default App;

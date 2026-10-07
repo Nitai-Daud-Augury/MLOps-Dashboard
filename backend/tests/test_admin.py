@@ -1,5 +1,8 @@
+from contextlib import contextmanager
 from datetime import datetime
 import json
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -24,7 +27,18 @@ from backfill_dashboard.admin import (
 from backfill_dashboard.control_store import JsonControlStore
 from backfill_dashboard.manifests import OrchestratedManifestWriteResult
 from backfill_dashboard.schemas import OrchestratedBackfillRequest, OrchestratedManifestRequest
-from sibling_repos import requires_metaflow_flow
+
+# Repo root lives under WORKSPACE_ROOT, so stubs here pass _safe_workspace_path in CI.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@contextmanager
+def _workspace_flow_stub(filename: str, content: str = "# test stub flow\n"):
+    """Minimal flow file under the checkout so create-command tests need no Augury sibling."""
+    with tempfile.TemporaryDirectory(prefix=".pytest_flow_", dir=_REPO_ROOT) as tmp:
+        flow = Path(tmp) / filename
+        flow.write_text(content, encoding="utf-8")
+        yield flow
 
 
 def test_workflow_review_repository_persists_acknowledgements(tmp_path):
@@ -154,16 +168,28 @@ def test_admin_action_repository_allows_only_one_preparing_trigger(tmp_path):
     assert next_action.id != pending.id
 
 
-@requires_metaflow_flow
 def test_create_command_uses_metaflow_argo_create():
     builder = WorkflowCommandBuilder()
 
-    cwd, command = builder.build_create(
-        WorkflowSourceRequest(source_type="local", local_flow_path=str(DEFAULT_FLOW_PATH))
-    )
+    with _workspace_flow_stub("FSTBackfill_prod_flow.py") as prod_flow:
+        cwd, command = builder.build_create(
+            WorkflowSourceRequest(source_type="local", local_flow_path=str(prod_flow))
+        )
 
-    assert cwd == DEFAULT_FLOW_PATH.parent
+    assert cwd == prod_flow.parent
+    assert command[-5:] == ["--no-pylint", "argo-workflows", "create", "--max-workers", "1"]
+
+
+def test_standard_backfill_create_keeps_default_parallelism():
+    builder = WorkflowCommandBuilder()
+
+    with _workspace_flow_stub("FSTBackfill_standard_flow.py") as standard_flow:
+        _, command = builder.build_create(
+            WorkflowSourceRequest(source_type="local", local_flow_path=str(standard_flow))
+        )
+
     assert command[-3:] == ["--no-pylint", "argo-workflows", "create"]
+    assert "--max-workers" not in command
 
 
 def test_prod_trigger_requires_confirmation():
@@ -447,6 +473,8 @@ def test_orchestrated_manifest_endpoint_uploads_without_triggering(monkeypatch):
                 manifest_count=2,
                 blob_url="https://example.invalid/manifests/run-1",
                 month_indices_by_machine=kwargs["month_indices_by_machine"],
+                windows_by_machine={},
+                split={"mode": "month", "days": None},
             )
 
     class Repository:
@@ -493,6 +521,8 @@ def _prepare_queued_orchestrated_test(monkeypatch, tmp_path, *, writer_error=Non
     import backfill_dashboard.app as app_module
     from fastapi import BackgroundTasks
 
+    monkeypatch.setattr(app_module, "BACKFILL_CANCEL_WINDOW_SECONDS", 0)
+
     machine_id = "683ec59079fecb5a5a240478"
     month_index = 17  # January 2026, relative to the August 2024 origin.
 
@@ -517,6 +547,8 @@ def _prepare_queued_orchestrated_test(monkeypatch, tmp_path, *, writer_error=Non
                 end_index=month_index + 1, month_count=1, manifest_count=1,
                 blob_url="https://example.invalid/test/run",
                 month_indices_by_machine=kwargs["month_indices_by_machine"],
+                windows_by_machine={},
+                split={"mode": "month", "days": None},
             )
 
     class Builder:
@@ -570,14 +602,59 @@ def test_orchestrated_backfill_returns_queued_action_before_slow_preparation(mon
     )
 
     assert result["accepted"] is True
-    assert result["action"]["phase"] == "queued"
+    assert result["action"]["phase"] == "cancel_window"
     assert result["action"]["command"] == []
     assert len(background.tasks) == 1
 
 
+def test_cancelled_backfill_never_prepares_or_submits(monkeypatch, tmp_path):
+    import backfill_dashboard.app as app_module
+    from fastapi import BackgroundTasks
+
+    machine_id = "683ec59079fecb5a5a240478"
+    actions = AdminActionRepository(tmp_path / "actions.json")
+    monkeypatch.setattr(app_module, "admin_repository", actions)
+    monkeypatch.setattr(app_module, "_require_ulrpm_orchestrator_access", lambda: pytest.fail("cancelled request reached Outerbounds readiness"))
+    monkeypatch.setattr(app_module, "manifest_writer", SimpleNamespace(write_orchestrated_monthly_manifests=lambda **_: pytest.fail("cancelled request wrote manifests")))
+    background = BackgroundTasks()
+    result = app_module.trigger_orchestrated_machine_backfill(
+        OrchestratedBackfillRequest(machine_ids=[machine_id], month_indices_by_machine={machine_id: [17]}),
+        background,
+    )
+    action_id = result["action"]["id"]
+    assert result["action"]["cancel_window_until"]
+    assert app_module.cancel_backfill_before_submit(action_id)["action"]["status"] == "cancelled"
+    task = background.tasks[0]
+    task.func(*task.args, **task.kwargs)
+    assert actions.get(action_id)["phase"] == "cancelled"
+
+
+def test_cancel_during_manifest_upload_never_submits(monkeypatch, tmp_path):
+    import backfill_dashboard.admin as admin_module
+
+    app_module, result, background, actions, control, machine_id, month_index = _prepare_queued_orchestrated_test(monkeypatch, tmp_path)
+    action_id = result["action"]["id"]
+    writer = app_module.manifest_writer
+
+    def write_then_cancel(**kwargs):
+        manifest = writer.write_orchestrated_monthly_manifests(**kwargs)
+        actions.cancel_pending_trigger(action_id)
+        return manifest
+
+    monkeypatch.setattr(app_module, "manifest_writer", SimpleNamespace(write_orchestrated_monthly_manifests=write_then_cancel))
+    monkeypatch.setattr(admin_module.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("cancelled request reached Argo"))
+    task = background.tasks[0]
+    task.func(*task.args, **task.kwargs)
+
+    action = actions.get(action_id)
+    assert action["status"] == "cancelled"
+    assert not action["command"] and not action["workflow_id"]
+    assert control.get_month_state(machine_id, month_index) is None
+
+
 def test_orchestrated_backfill_background_submission_succeeds_and_links_reservation(monkeypatch, tmp_path):
     app_module, result, background, actions, control, machine_id, month_index = _prepare_queued_orchestrated_test(monkeypatch, tmp_path)
-    assert result["action"]["phase"] == "queued"
+    assert result["action"]["phase"] == "cancel_window"
 
     task = background.tasks[0]
     task.func(*task.args, **task.kwargs)

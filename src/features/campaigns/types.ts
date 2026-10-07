@@ -1,6 +1,6 @@
 export type Cohort = 'standard' | 'ulrpm' | 'unknown';
 export type MachineRecord = {
-  machine_id: string; display_name: string; status: string; resource_cohort: Cohort;
+  machine_id: string; display_name: string; is_test_machine?: boolean; status: string; resource_cohort: Cohort;
   backfill_eligible: boolean; classification_reason: string[]; endpoint_count: number;
   site_name?: string; organization_name?: string;
 };

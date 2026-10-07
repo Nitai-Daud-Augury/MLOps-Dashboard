@@ -38,7 +38,14 @@ DEFAULT_ULRPM_ORCHESTRATOR_TEMPLATE = os.getenv(
     "BACKFILL_ULRPM_ORCHESTRATOR_TEMPLATE",
     "fstbkfill.test.devfstm.ulrpmdeatorflow-hwqbr",
 )
-ULRPM_ORCHESTRATOR_CONTRACT_VERSION = "2026-09-17-v4"
+ULRPM_ORCHESTRATOR_CONTRACT_VERSION = "2026-10-06-v5"
+ULRPM_ORCHESTRATOR_LEGACY_CONTRACT_VERSION = "2026-09-17-v4"
+ULRPM_ORCHESTRATOR_SUPPORTED_CONTRACTS = {
+    ULRPM_ORCHESTRATOR_CONTRACT_VERSION,
+    ULRPM_ORCHESTRATOR_LEGACY_CONTRACT_VERSION,
+}
+MANIFEST_PLAN_MAX_BYTES = 256 * 1024
+
 DEFAULT_FULLRLBL_TEST_TEMPLATE = os.getenv(
     "BACKFILL_FULLRLBL_TEST_TEMPLATE",
     "fullrsttest.test.testulr.fullrlestflow-zsx6n",
@@ -120,7 +127,7 @@ class RunningWorkflow:
 class AdminAction:
     id: str
     action: WorkflowAction
-    status: Literal["queued", "running", "succeeded", "failed"]
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
     command: list[str]
     cwd: str
     created_at: str
@@ -134,6 +141,9 @@ class AdminAction:
     flow_name: str | None = None
     reservation_cleanup_pending: bool = False
     phase: str | None = None
+    cancel_window_until: str | None = None
+    manifest_windows: dict | None = None
+    split: dict | None = None
 
 
 class AdminActionRepository:
@@ -262,6 +272,7 @@ class AdminActionRepository:
                     or action.phase not in {
                         None,
                         "queued",
+                        "cancel_window",
                         "validating",
                         "preparing_manifests",
                         "submitting",
@@ -297,6 +308,7 @@ class AdminActionRepository:
         machine_ids: list[str] | None = None,
         flow_name: str | None = None,
         phase: str | None = None,
+        cancel_window_until: str | None = None,
         exclusive_trigger_submission: bool = False,
     ) -> AdminAction:
         item = AdminAction(
@@ -310,19 +322,48 @@ class AdminActionRepository:
             machine_ids=machine_ids or [],
             flow_name=flow_name,
             phase=phase,
+            cancel_window_until=cancel_window_until,
         )
         with self._lock:
             if exclusive_trigger_submission:
                 pending = next((
                     existing for existing in self._actions.values()
                     if existing.action == "trigger"
-                    and existing.phase in {"queued", "validating", "preparing_manifests", "submitting"}
+                    and existing.status in {"queued", "running"}
+                    and existing.phase in {"queued", "cancel_window", "validating", "preparing_manifests", "submitting"}
                 ), None)
                 if pending:
                     raise ValueError(f"Backfill trigger {pending.id} is already {pending.phase}")
             self._actions[item.id] = item
             self._persist()
         return item
+
+    def cancel_pending_trigger(self, action_id: str) -> dict:
+        """Cancel before Argo submission, including interrupted preparation."""
+        with self._lock:
+            action = self._actions.get(action_id)
+            if action is None:
+                raise KeyError(action_id)
+            if (action.action != "trigger" or action.status != "queued" or action.workflow_id
+                    or action.phase not in {"queued", "cancel_window", "validating", "preparing_manifests"}):
+                raise ValueError("Backfill submission has started or the action is already terminal")
+            action.status = "cancelled"
+            action.phase = "cancelled"
+            action.finished_at = _now()
+            self._persist()
+            return asdict(action)
+
+    def begin_trigger_preparation(self, action_id: str) -> bool:
+        """Atomically close the cancellation window before touching Outerbounds."""
+        with self._lock:
+            action = self._actions[action_id]
+            if action.status != "queued" or action.phase != "cancel_window":
+                return False
+            if action.cancel_window_until and datetime.now(timezone.utc) < datetime.fromisoformat(action.cancel_window_until):
+                return False
+            action.phase = "validating"
+            self._persist()
+            return True
 
     def update_trigger(
         self,
@@ -332,11 +373,15 @@ class AdminActionRepository:
         command: list[str] | None = None,
         cwd: Path | None = None,
         machine_ids: list[str] | None = None,
+        manifest_windows: dict | None = None,
+        split: dict | None = None,
     ) -> dict:
         with self._lock:
             action = self._actions[action_id]
             if action.action != "trigger":
                 raise ValueError("Only trigger actions support preparation phases")
+            if action.status != "queued":
+                raise ValueError("A completed or cancelled trigger cannot be prepared")
             action.phase = phase
             if command is not None:
                 action.command = command
@@ -344,6 +389,10 @@ class AdminActionRepository:
                 action.cwd = str(cwd)
             if machine_ids is not None:
                 action.machine_ids = machine_ids
+            if manifest_windows is not None:
+                action.manifest_windows = manifest_windows
+            if split is not None:
+                action.split = split
             self._persist()
             return asdict(action)
 
@@ -382,6 +431,8 @@ class AdminActionRepository:
     def run(self, action_id: str) -> None:
         with self._lock:
             action = self._actions[action_id]
+            if action.status != "queued" or (action.phase and action.phase != "submitting"):
+                raise ValueError("Trigger is not ready for submission")
             action.status = "running"
             self._persist()
 
@@ -433,6 +484,9 @@ class AdminActionRepository:
                 item.setdefault("flow_name", None)
                 item.setdefault("reservation_cleanup_pending", False)
                 item.setdefault("phase", None)
+                item.setdefault("cancel_window_until", None)
+                item.setdefault("manifest_windows", None)
+                item.setdefault("split", None)
                 if item.get("outerbounds_url"):
                     item["outerbounds_url"] = _normalize_outerbounds_url(item["outerbounds_url"])
             return {item["id"]: AdminAction(**item) for item in raw}
@@ -512,7 +566,10 @@ class WorkflowCommandBuilder:
 
     def build_create(self, source: WorkflowSourceRequest) -> tuple[Path, list[str]]:
         cwd, flow_path = self.resolve_source(source)
-        return cwd, [_python_executable(), str(flow_path), "--no-pylint", "argo-workflows", "create"]
+        command = [_python_executable(), str(flow_path), "--no-pylint", "argo-workflows", "create"]
+        if flow_path.name in {"FSTBackfill_prod_flow.py", "FSTBackfill_ulrpm_flow.py"} and os.getenv("FST_BACKFILL_RESOURCE_PROFILE", "ulrpm") == "ulrpm":
+            command.extend(["--max-workers", "1"])
+        return cwd, command
 
     def validate_cli(self, source: WorkflowSourceRequest) -> dict:
         cwd, flow_path = self.resolve_source(source)
@@ -593,23 +650,33 @@ class WorkflowCommandBuilder:
             if isinstance(item, dict)
         }
         deployed_contract = str(parameters.get("orchestrator_contract_version", "")).strip('"')
-        if deployed_contract != ULRPM_ORCHESTRATOR_CONTRACT_VERSION:
+        if deployed_contract not in ULRPM_ORCHESTRATOR_SUPPORTED_CONTRACTS:
             return {
                 "ready": False,
                 "detail": (
-                    "ULRPM parent orchestrator template is stale: expected contract "
-                    f"{ULRPM_ORCHESTRATOR_CONTRACT_VERSION}, found {deployed_contract or 'none'}. "
+                    "ULRPM parent orchestrator template is stale: expected one of "
+                    f"{sorted(ULRPM_ORCHESTRATOR_SUPPORTED_CONTRACTS)}, found {deployed_contract or 'none'}. "
                     "Redeploy UlrpmDevBackfillOrchestratorFlow.py before submitting."
                 ),
                 "workflow_template": self.ulrpm_orchestrator_template,
                 "expected_contract": ULRPM_ORCHESTRATOR_CONTRACT_VERSION,
                 "deployed_contract": deployed_contract or None,
             }
+        supports_split = deployed_contract == ULRPM_ORCHESTRATOR_CONTRACT_VERSION
+        detail = (
+            "ULRPM parent orchestrator and child FSTBackfill template are ready."
+            if supports_split
+            else (
+                "ULRPM parent orchestrator template reports legacy contract "
+                f"{deployed_contract}; only Full month split is allowed until v5 is redeployed."
+            )
+        )
         return {
             "ready": True,
-            "detail": "ULRPM parent orchestrator and child FSTBackfill template are ready.",
+            "detail": detail,
             "workflow_template": self.ulrpm_orchestrator_template,
             "contract_version": deployed_contract,
+            "supports_submonth_split": supports_split,
         }
 
     def build_trigger(self, source: WorkflowSourceRequest, params: TriggerParams) -> tuple[Path, list[str]]:
@@ -662,6 +729,7 @@ class WorkflowCommandBuilder:
         end_index: int,
         params: TriggerParams,
         month_indices_by_machine: dict[str, list[int]] | None = None,
+        manifest_plan: dict | None = None,
     ) -> tuple[Path, list[str]]:
         if params.environment not in {"dev", "prod"}:
             raise ValueError("environment must be dev or prod")
@@ -718,6 +786,16 @@ class WorkflowCommandBuilder:
             "-p",
             "redeploy_fst_template=false",
         ]
+        if manifest_plan:
+            # Double-encode like machine_month_indices so Argo delivers a JSON string parameter.
+            serialized = json.dumps(json.dumps(manifest_plan, separators=(",", ":"), sort_keys=True))
+            if len(serialized) > MANIFEST_PLAN_MAX_BYTES:
+                raise ValueError(
+                    f"machine_manifest_plan is too large ({len(serialized)} bytes; "
+                    f"maximum {MANIFEST_PLAN_MAX_BYTES}). Reduce the split or machine count. "
+                    "No workflow was started."
+                )
+            command.extend(["-p", f"machine_manifest_plan={serialized}"])
         return DEFAULT_METAFLOW_DIR, command
 
     def build_logs(self, source: WorkflowSourceRequest, params: LogLookupParams) -> tuple[Path, list[str]]:

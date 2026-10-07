@@ -23,3 +23,21 @@ ulrpm_backfill_dashboard_state.json
 ulrpm_backfill_admin_actions.json
 ulrpm_backfill_workflow_reviews.json
 ulrpm_backfill_control.json
+
+# --- local hardening (IDE, logs, temp, coverage) ---
+.idea/
+.vscode/
+*.log
+logs/
+tmp/
+temp/
+.next/
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/
+Thumbs.db
+
+
+# Local Node poll contract check (pytest covers the same; not in CI)
+scripts/check-admin-action-poll.mjs

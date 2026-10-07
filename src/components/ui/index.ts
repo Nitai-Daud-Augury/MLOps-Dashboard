@@ -5,3 +5,4 @@ export * from './LoadingMetrics';
 export * from './LoadingWidget';
 export * from './Progress';
 export * from './StatusPill';
+export * from './TestMachineBadge';

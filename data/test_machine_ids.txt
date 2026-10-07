@@ -1,0 +1,2 @@
+# Explicit test assets: inventory metadata may be missing from cached scans.
+6a747b591f957aebfe6c59cf

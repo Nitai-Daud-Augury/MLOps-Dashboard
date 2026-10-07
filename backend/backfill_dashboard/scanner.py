@@ -17,6 +17,7 @@ from .models import (
     MonthPartition,
     MonthStatus,
 )
+from .mongo_inventory import build_mongo_provider
 from .months import orchestrator_month_index, orchestrator_months
 from .parquet_inspector import inspect_feature_partition
 from .policy import BackfillDecisionPolicy
@@ -63,15 +64,22 @@ class BackfillScanner:
         installation_starts: dict[str, tuple[int, int]] = {}
         installation_dates: dict[str, str] = {}
         display_names: dict[str, str] = {}
-        test_machines: set[str] = set()
-        if self.lifecycle_inventory is not None:
+        test_machines: set[str] = set(self.settings.test_machine_ids or ())
+        lifecycle_inventory = self.lifecycle_inventory
+        lifecycle_status = self.lifecycle_status
+        if lifecycle_inventory is None and lifecycle_status in {"unreachable", "unauthorized"}:
+            # The API may have started before the private Mongo network became
+            # reachable. Reconnect for each new scan instead of retaining that
+            # startup failure for the lifetime of the process.
+            lifecycle_inventory, lifecycle_status = build_mongo_provider()
+        if lifecycle_inventory is not None:
             try:
-                lifecycle_records = self.lifecycle_inventory.get_many(machine_ids)
+                lifecycle_records = lifecycle_inventory.get_many(machine_ids)
                 for record in lifecycle_records:
                     if record.display_name:
                         display_names[record.machine_id] = record.display_name
                     if record.is_test_machine:
-                        test_machines.add(record.machine_id)
+                        test_machines.add(record.machine_id.lower())
                     installation_start = _iso_month(record.installation_at)
                     if installation_start and record.installation_at:
                         installation_starts[record.machine_id] = installation_start
@@ -82,13 +90,16 @@ class BackfillScanner:
                             coverage_ends[record.machine_id] = coverage_end
                 lifecycle_warning = (
                     f"Lifecycle filtering applied ({len(installation_starts)} installation date(s), "
-                    f"{len(coverage_ends)} cutoff(s), status {self.lifecycle_status}); "
+                    f"{len(coverage_ends)} cutoff(s), status {lifecycle_status}); "
                     "the curated scan cohort was unchanged."
                 )
             except Exception:
                 lifecycle_warning = "Lifecycle lookup failed; lifecycle filtering was unavailable and the scan continued fail-open."
         else:
-            lifecycle_warning = "Lifecycle filtering unavailable; the scan continued without lifecycle cutoffs."
+            lifecycle_warning = (
+                f"Lifecycle filtering unavailable (Mongo status: {lifecycle_status}); "
+                "the scan continued without lifecycle cutoffs or Mongo test-machine metadata."
+            )
         if machine_progress_callback:
             machine_progress_callback(0, len(machine_ids))
         if progress_callback:
@@ -169,7 +180,7 @@ class BackfillScanner:
                             coverage_starts.get(machine_id),
                             installation_dates.get(machine_id),
                             display_names.get(machine_id),
-                            machine_id in test_machines,
+                            machine_id.lower() in test_machines,
                         ))
                     if machine_progress_callback:
                         machine_progress_callback(completed_machines, len(machine_ids))
@@ -187,7 +198,7 @@ class BackfillScanner:
                 coverage_starts.get(machine_id),
                 installation_dates.get(machine_id),
                 display_names.get(machine_id),
-                machine_id in test_machines,
+                machine_id.lower() in test_machines,
             )
             for machine_id, months in by_machine.items()
         ]

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -43,6 +45,38 @@ def _machine_ids_path() -> Path:
     return _dashboard_root / "data" / "unique_machine_ids.txt"
 
 
+def _test_machine_ids_path() -> Path:
+    configured = os.getenv("MLOPS_TEST_MACHINE_IDS_FILE")
+    if configured:
+        path = Path(configured).expanduser()
+        return path if path.is_absolute() else _dashboard_root / path
+    return _dashboard_root / "data" / "test_machine_ids.txt"
+
+
+def load_test_machine_ids(path: Path, additional_ids: str | None = None) -> frozenset[str]:
+    """Load an explicit test-machine allowlist without consulting inventory services."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Test machine registry not found: {path}")
+    machine_ids: set[str] = set()
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        value = line.split("#", 1)[0].strip()
+        if not value:
+            continue
+        normalized = value.lower()
+        if not re.fullmatch(r"[0-9a-f]{24}", normalized):
+            raise ValueError(f"Invalid test machine ID at {path}:{line_number}: {value!r}")
+        machine_ids.add(normalized)
+    for value in (additional_ids or "").split(","):
+        value = value.strip()
+        if not value:
+            continue
+        normalized = value.lower()
+        if not re.fullmatch(r"[0-9a-f]{24}", normalized):
+            raise ValueError(f"Invalid MLOPS_TEST_MACHINE_IDS entry: {value!r}")
+        machine_ids.add(normalized)
+    return frozenset(machine_ids)
+
+
 @dataclass(frozen=True)
 class Settings:
     fst_account: str = os.getenv("FST_PROD_ACCOUNT_NAME", "auguryprodfsthns")
@@ -56,6 +90,8 @@ class Settings:
         )
     )
     machine_ids_file: Path = _machine_ids_path()
+    test_machine_ids_file: Path = field(default_factory=_test_machine_ids_path)
+    test_machine_ids: frozenset[str] | None = None
     augury_machine_url_template: str = os.getenv(
         "AUGURY_MACHINE_URL_TEMPLATE",
         "https://app.augury.com/#/machine_health/machines/{machine_id}",
@@ -88,6 +124,13 @@ class Settings:
             _csv_env("BACKFILL_TARGET_FEATURES", EXPECTED_ULTRASONIC_V2_COLUMNS),
         )
         object.__setattr__(self, "target_months", orchestrator_months())
+        configured_ids = self.test_machine_ids
+        if configured_ids is None:
+            configured_ids = load_test_machine_ids(
+                self.test_machine_ids_file,
+                os.getenv("MLOPS_TEST_MACHINE_IDS"),
+            )
+        object.__setattr__(self, "test_machine_ids", frozenset(item.lower() for item in configured_ids))
 
 
 def get_settings() -> Settings:
