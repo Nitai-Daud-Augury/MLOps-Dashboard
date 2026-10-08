@@ -37,7 +37,7 @@ export function OuterboundsProbePanel({ status }: { status: OuterboundsProbeStat
       <div>
         <p className="eyebrow">Diagnostics</p>
         <h2>Outerbounds connectivity probe</h2>
-        <p>Read-only checks against {status.domain} (perimeter {status.perimeter}): network, Metaflow import, auth and run listing. Credentials: {status.credentials_source}.</p>
+        <p>Read-only checks against {status.domain} (perimeter {status.perimeter}): network, Metaflow import, auth and run listing. Credentials: {status.credentials_source}.{status.python?.ok ? ` Child Python: ${status.python.path} (${status.python.source}).` : ''}</p>
       </div>
       <div className="actions probe-actions">
         <label className="probe-flow">Flow
@@ -51,6 +51,7 @@ export function OuterboundsProbePanel({ status }: { status: OuterboundsProbeStat
         </button>
       </div>
     </header>
+    {status.python && !status.python.ok ? <div className="probe-error" role="alert">Child Python unavailable: {status.python.error}</div> : null}
     {error ? <div className="probe-error" role="alert">{error}</div> : null}
     {result ? <>
       <p className="probe-summary">Overall <ProbeStatusBadge status={result.overall} /> · flow {result.flow} · {result.ms} ms · {new Date(result.finished_at).toLocaleString()}</p>

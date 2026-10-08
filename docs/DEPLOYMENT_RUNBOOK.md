@@ -290,11 +290,24 @@ would be a Databricks secret resource plus `valueFrom` in `app.yaml`. Metaflow w
 child process so the API process never holds the resolved Outerbounds config. Tokens,
 `Authorization`/`x-api-key` values and the config URL path are never returned or logged.
 
+Child interpreter: by default the API's own `sys.executable`, made absolute against the
+directory the API started in (Databricks Apps starts the app as a relative
+`.venv/bin/python`). The child is launched with `-m` and an explicit `PYTHONPATH` derived
+from the package location, in a throw-away temp working directory, so it does not depend on
+the API's cwd, a `.venv` folder or a home-directory layout. `OUTERBOUNDS_PROBE_PYTHON`
+(optional, normally **unset**, not in `app.yaml`) overrides the interpreter; it is resolved
+to an absolute path and must be an existing executable file. A missing or invalid
+interpreter fails `packages` / `list_runs` with `error_type=interpreter_missing` naming the
+path, while the other stages still run. The status endpoint shows the resolved interpreter
+(`python.path`, `python.source`, `python.ok`) and whether a Metaflow config file exists
+(`metaflow_config`). In Apps there is normally no `~/.metaflowconfig`, so credentials can
+only come from env.
+
 Each stage logs one `[outerbounds-probe]` line, plus a `probe done:` summary
 (`grep '\[outerbounds-probe\]' /tmp/api.log`). Manual run without the API:
 
 ```bash
-cd backend && python -m backfill_dashboard.outerbounds_probe --flow FSTBackfill
+PYTHONPATH="$PWD/backend" python -m backfill_dashboard.outerbounds_probe --flow FSTBackfill   # from the repo root; any cwd works with an absolute PYTHONPATH
 ```
 
 `app.yaml` sets the probe ON with trigger OFF. The `prod` target deploys the same `app.yaml`,

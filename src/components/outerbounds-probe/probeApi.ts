@@ -32,6 +32,9 @@ export interface OuterboundsProbeStatus {
   deployment_id_configured: boolean;
   stage_timeout_seconds: number;
   credentials_source: 'env' | 'config_file' | 'none';
+  /** Interpreter used for the Metaflow child process (absolute path; error set when unusable). */
+  python?: { path: string; source: string; ok: boolean; error: string | null };
+  metaflow_config?: { dir: string; config_file_present: boolean };
   last_result: ProbeResult | null;
 }
 
