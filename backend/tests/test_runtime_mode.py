@@ -178,3 +178,10 @@ def test_deployed_control_plane_disables_campaign_dispatch(tmp_path, monkeypatch
     )
     plane = ControlPlane(settings, object(), "healthy", manifest_writer=None, workflow_mutations_enabled=False)
     assert plane.runtime.dispatcher is None
+
+
+def test_outerbounds_probe_routes_are_not_workflow_mutations():
+    from backfill_dashboard import app as app_module
+
+    assert not app_module._workflow_mutation_route("POST", "/api/diagnostics/outerbounds")
+    assert not app_module._workflow_mutation_route("GET", "/api/diagnostics/outerbounds/status")

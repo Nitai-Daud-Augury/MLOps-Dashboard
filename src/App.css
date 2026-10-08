@@ -2416,7 +2416,7 @@ tbody tr { transition: background-color var(--transition-fast), transform var(--
 .admin-sidebar-brand { align-items: center; color: var(--text-primary); display: flex; font-size: 14px; font-weight: 800; gap: 9px; margin: 3px 5px 16px; }.admin-sidebar-brand svg { color: var(--accent); }
 .admin-sidebar-nav { display: grid; gap: 4px; }.admin-sidebar-nav button { align-items: center; background: transparent; border: 0; border-radius: var(--radius-sm); color: var(--text-secondary); cursor: pointer; display: flex; font: inherit; font-size: 13px; font-weight: 600; gap: 10px; padding: 10px; text-align: left; transition: background var(--transition-fast), color var(--transition-fast), transform var(--transition-fast); width: 100%; }.admin-sidebar-nav button:hover { background: var(--bg-surface-alt); color: var(--text-primary); }.admin-sidebar-nav button.active { background: var(--accent-subtle); color: var(--accent-text); }.admin-sidebar-nav button.active svg { color: var(--accent); }
 .admin-sidebar > p { border-top: 1px solid var(--border); color: var(--text-muted); font-size: 11px; line-height: 1.45; margin: 14px 4px 2px; padding-top: 12px; }
-.admin-workspace[data-admin-view="overview"] .admin-view-panel:not(.overview-panel), .admin-workspace[data-admin-view="backfill"] .admin-view-panel:not(.backfill-panel), .admin-workspace[data-admin-view="campaigns"] .admin-view-panel:not(.campaigns-panel), .admin-workspace[data-admin-view="operations"] .admin-view-panel:not(.operations-panel), .admin-workspace[data-admin-view="reviews"] .admin-view-panel:not(.reviews-panel), .admin-workspace[data-admin-view="cost"] .admin-view-panel:not(.cost-panel), .admin-workspace[data-admin-view="advanced"] .admin-view-panel:not(.advanced-view-panel), .admin-workspace[data-admin-view="observability"] .admin-view-panel:not(.observability-panel) { display: none !important; }
+.admin-workspace[data-admin-view="overview"] .admin-view-panel:not(.overview-panel), .admin-workspace[data-admin-view="backfill"] .admin-view-panel:not(.backfill-panel), .admin-workspace[data-admin-view="campaigns"] .admin-view-panel:not(.campaigns-panel), .admin-workspace[data-admin-view="operations"] .admin-view-panel:not(.operations-panel), .admin-workspace[data-admin-view="reviews"] .admin-view-panel:not(.reviews-panel), .admin-workspace[data-admin-view="cost"] .admin-view-panel:not(.cost-panel), .admin-workspace[data-admin-view="advanced"] .admin-view-panel:not(.advanced-view-panel), .admin-workspace[data-admin-view="observability"] .admin-view-panel:not(.observability-panel), .admin-workspace[data-admin-view="diagnostics"] .admin-view-panel:not(.diagnostics-panel) { display: none !important; }
 .admin-workspace[data-admin-view="overview"] .admin-grid, .admin-workspace[data-admin-view="backfill"] .admin-grid { display: none; }
 .admin-workspace[data-admin-view="operations"] .admin-grid, .admin-workspace[data-admin-view="advanced"] .admin-grid, .admin-workspace[data-admin-view="observability"] .admin-grid { display: grid; }
 .dark .admin-sidebar { background: var(--bg-surface); border-color: var(--border); }.dark .admin-sidebar-nav button { color: var(--text-secondary); }.dark .admin-sidebar-nav button:hover { background: var(--bg-surface-alt); color: var(--text-primary); }.dark .admin-sidebar-nav button.active { background: var(--accent-subtle); color: var(--accent-text); }
@@ -2659,3 +2659,21 @@ tbody tr { transition: background-color var(--transition-fast), transform var(--
 .machine-pick-mode { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .machine-pick-mode button { background: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: var(--radius-pill); color: var(--text-secondary); cursor: pointer; font: inherit; font-size: 12px; font-weight: 700; padding: 6px 10px; }
 .machine-pick-mode button.active { background: var(--accent-subtle); border-color: var(--info-border); color: var(--accent-text); }
+
+/* Outerbounds connectivity probe (Admin > Outerbounds probe) */
+.outerbounds-probe-panel { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); margin: 0 auto; max-width: 1480px; padding: 20px; }
+.outerbounds-probe-panel .panel-header { border-bottom: 1px solid var(--border); justify-content: space-between; margin-bottom: 16px; padding-bottom: 14px; }
+.outerbounds-probe-panel .probe-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; }
+.outerbounds-probe-panel .probe-flow, .outerbounds-probe-panel .probe-trigger { align-items: center; display: inline-flex; gap: 6px; font-size: 13px; }
+.probe-summary { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; color: var(--text-secondary); }
+.probe-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.probe-table th, .probe-table td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+.probe-table td.num, .probe-table th.num { text-align: right; white-space: nowrap; }
+.probe-table .probe-detail { word-break: break-word; }
+.probe-badge { border: 1px solid transparent; border-radius: var(--radius-pill); display: inline-flex; font-size: 11px; font-weight: 800; line-height: 1; padding: 5px 8px; white-space: nowrap; }
+.probe-badge.pass { background: var(--success-bg); border-color: var(--success); color: var(--success-text); }
+.probe-badge.fail { background: var(--error-bg); border-color: var(--error); color: var(--error-text); }
+.probe-badge.expected_fail { background: var(--warning-bg); border-color: var(--warning-border); color: var(--warning-text); }
+.probe-badge.skip { background: var(--bg-inset); border-color: var(--border); color: var(--text-secondary); }
+.probe-error { background: var(--error-bg); border: 1px solid var(--error); border-radius: var(--radius-md); color: var(--error-text); margin-bottom: 12px; padding: 10px 12px; }
+.probe-empty { color: var(--text-secondary); margin: 0; }

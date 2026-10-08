@@ -59,6 +59,7 @@ from .control_store import ACTIVE_MONTH_STATES
 from .inventory_models import MachineSearchQuery
 from .scanner import BackfillScanner
 from .outerbounds_costs import current_cost_report
+from . import outerbounds_probe
 from .middleware import register_polling_guard
 from .static_host import LOCAL_VITE_ORIGINS, local_vite_development_enabled, register_static_spa_host
 from .control_plane.inventory_routes import etag_response
@@ -179,6 +180,46 @@ def health() -> dict:
         "source_account": settings.fst_account,
         "source_container": settings.fst_container,
     }
+
+
+# --- Outerbounds connectivity probe (read-only diagnostics) ---------------------
+# Gated by OUTERBOUNDS_PROBE_ENABLED: both routes return 404 when it is off.
+# Not a workflow-mutation route: the trigger stage is skipped unless
+# OUTERBOUNDS_PROBE_TRIGGER_ENABLED=1, the request opts in, and the deployment
+# id is allowlisted.
+_OUTERBOUNDS_PROBE_DISABLED = "Outerbounds probe is disabled (set OUTERBOUNDS_PROBE_ENABLED=1)."
+
+
+@app.get("/api/diagnostics/outerbounds/status")
+def outerbounds_probe_status() -> dict:
+    if not outerbounds_probe.probe_enabled():
+        raise HTTPException(status_code=404, detail=_OUTERBOUNDS_PROBE_DISABLED)
+    return {**outerbounds_probe.describe_config(), "last_result": outerbounds_probe.last_result()}
+
+
+@app.post("/api/diagnostics/outerbounds")
+async def run_outerbounds_probe(request: Request) -> dict:
+    if not outerbounds_probe.probe_enabled():
+        raise HTTPException(status_code=404, detail=_OUTERBOUNDS_PROBE_DISABLED)
+    try:
+        body = await request.json() if (await request.body()) else {}
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Request body must be JSON.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="Request body must be a JSON object.")
+    flow = body.get("flow")
+    deployment_id = body.get("deployment_id")
+    include_trigger = body.get("include_trigger", False)
+    if (flow is not None and not isinstance(flow, str)) or (deployment_id is not None and not isinstance(deployment_id, str)) \
+            or not isinstance(include_trigger, bool):
+        raise HTTPException(status_code=422, detail="flow/deployment_id must be strings and include_trigger a boolean.")
+    try:
+        # Stages block (sockets, child processes); keep them off the event loop.
+        return await asyncio.to_thread(outerbounds_probe.run_probe, flow, include_trigger, deployment_id)
+    except outerbounds_probe.ProbeNotAllowed as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except outerbounds_probe.ProbeBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/outerbounds/cost-report")

@@ -18,7 +18,8 @@ export type AdminView =
   | "reviews"
   | "cost"
   | "advanced"
-  | "observability";
+  | "observability"
+  | "diagnostics";
 export interface AdminSpec {
   runtime?: RuntimeInfo;
   default_local_flow_path: string;

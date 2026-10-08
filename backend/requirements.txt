@@ -13,3 +13,9 @@ databricks-sdk>=0.20
 pymongo[srv]>=4.6
 python-dotenv>=1.0
 PyYAML>=6.0
+# Outerbounds connectivity probe (Metaflow client). Pinned to the Outerbounds
+# env used for FSTBackfill on the Mac (outerbounds 0.12.39 -> ob-metaflow
+# 2.19.34.1 + ob-metaflow-extensions 1.6.24). The extensions resolve the
+# Outerbounds remote config; the full `outerbounds` CLI package is not needed.
+ob-metaflow==2.19.34.1
+ob-metaflow-extensions==1.6.24
