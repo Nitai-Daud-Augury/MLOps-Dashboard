@@ -31,6 +31,13 @@ free of Metaflow's global config (the Outerbounds extension caches the resolved
 config, including the service key, in ``os.environ``), lets a hung call be
 killed at the stage deadline, and makes "no config" runs reproducible.
 
+The child is launched with an absolute interpreter (``sys.executable`` made
+absolute against the API's start-up directory, or OUTERBOUNDS_PROBE_PYTHON when
+set) and ``-m`` with an explicit PYTHONPATH derived from this package's
+location, in a throw-away temp working directory. Nothing depends on the API's
+current working directory, a ``.venv`` folder or a home directory layout; a
+missing/invalid interpreter fails the stage with ``error_type=interpreter_missing``.
+
 Secrets (service keys, Authorization / x-api-key headers, the config URL path)
 are never returned or logged; all text passes through ``redact``.
 """
@@ -45,6 +52,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -57,6 +65,15 @@ from urllib.parse import urlparse
 LOGGER_NAME = "uvicorn.error.outerbounds_probe"
 PREFIX = "[outerbounds-probe]"
 logger = logging.getLogger(LOGGER_NAME)
+
+# Captured at import: a relative sys.executable (Databricks Apps starts the app as
+# ``.venv/bin/python``) or a relative METAFLOW_HOME is relative to this directory,
+# not to whatever cwd a later child process gets.
+try:
+    _STARTUP_CWD = os.getcwd()
+except OSError:  # cwd deleted underneath us
+    _STARTUP_CWD = ""
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 DEFAULT_DOMAIN = "augury.obp.outerbounds.com"
 DEFAULT_PERIMETER = "default"
@@ -83,6 +100,7 @@ CONFIG_ENV_KEYS = (
     "OUTERBOUNDS_PROBE_FLOW_ALLOWLIST",
     "OUTERBOUNDS_PROBE_DEPLOYMENT_ID",
     "OUTERBOUNDS_PROBE_EXTRA_HOST",
+    "OUTERBOUNDS_PROBE_PYTHON",
 )
 PACKAGE_NAMES = ("ob-metaflow", "ob-metaflow-extensions", "metaflow", "outerbounds")
 STAGES = (
@@ -169,8 +187,64 @@ class Credentials:
         return bool(self.token)
 
 
+def _absolute(path: str) -> str:
+    """Absolute path for *path*; relative paths are taken against the API's start-up cwd."""
+    expanded = os.path.expanduser(path)
+    if not os.path.isabs(expanded) and _STARTUP_CWD:
+        expanded = os.path.join(_STARTUP_CWD, expanded)
+    return os.path.abspath(expanded)
+
+
 def _metaflow_home() -> Path:
-    return Path(os.environ.get("METAFLOW_HOME") or (Path.home() / ".metaflowconfig"))
+    """METAFLOW_HOME (absolute) or ~/.metaflowconfig. In Databricks Apps neither
+    normally exists, so credentials must come from env (METAFLOW_SERVICE_AUTH_KEY +
+    OBP_METAFLOW_CONFIG_URL); a missing directory simply means "no config file"."""
+    configured = _env("METAFLOW_HOME")
+    if configured:
+        return Path(_absolute(configured))
+    try:
+        return Path.home() / ".metaflowconfig"
+    except (RuntimeError, KeyError):  # no HOME and no passwd entry
+        return Path(_STARTUP_CWD or tempfile.gettempdir()) / ".metaflowconfig"
+
+
+@dataclass(frozen=True)
+class Interpreter:
+    path: str
+    source: str  # "sys.executable" | "OUTERBOUNDS_PROBE_PYTHON"
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.error
+
+
+def _usable(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def resolve_interpreter() -> Interpreter:
+    """Absolute interpreter for the Metaflow child. Never resolves symlinks (that
+    would escape a virtualenv and lose its site-packages)."""
+    override = _env("OUTERBOUNDS_PROBE_PYTHON")
+    if override:
+        path = _absolute(override)
+        if not os.path.exists(path):
+            return Interpreter(path, "OUTERBOUNDS_PROBE_PYTHON", f"OUTERBOUNDS_PROBE_PYTHON={path} does not exist")
+        if not _usable(path):
+            return Interpreter(path, "OUTERBOUNDS_PROBE_PYTHON", f"OUTERBOUNDS_PROBE_PYTHON={path} is not an executable file")
+        return Interpreter(path, "OUTERBOUNDS_PROBE_PYTHON")
+    raw = sys.executable or ""
+    if not raw:
+        return Interpreter("", "sys.executable", "sys.executable is empty (embedded interpreter?); set OUTERBOUNDS_PROBE_PYTHON")
+    candidates = [_absolute(raw)]
+    if not os.path.isabs(raw):
+        candidates.append(os.path.abspath(raw))  # current cwd, in case it differs from start-up
+        candidates.append(os.path.join(sys.prefix, "bin", os.path.basename(raw)))
+    for candidate in dict.fromkeys(candidates):
+        if _usable(candidate):
+            return Interpreter(candidate, "sys.executable")
+    return Interpreter(candidates[0], "sys.executable", f"sys.executable {raw!r} resolved to {candidates[0]}, which is not an executable file; set OUTERBOUNDS_PROBE_PYTHON")
 
 
 def resolve_credentials() -> Credentials:
@@ -247,6 +321,8 @@ def describe_config() -> dict[str, Any]:
     """Non-secret view for the status endpoint and UI."""
     cfg = ProbeConfig.from_env()
     creds = resolve_credentials()
+    interpreter = resolve_interpreter()
+    home = _metaflow_home()
     return {
         "enabled": probe_enabled(),
         "trigger_enabled": cfg.trigger_enabled,
@@ -258,6 +334,8 @@ def describe_config() -> dict[str, Any]:
         "stage_timeout_seconds": cfg.stage_timeout,
         "credentials_source": creds.source,
         "config_keys": config_keys_presence(),
+        "python": {"path": interpreter.path, "source": interpreter.source, "ok": interpreter.ok, "error": interpreter.error or None},
+        "metaflow_config": {"dir": str(home), "config_file_present": (home / "config.json").is_file()},
     }
 
 
@@ -340,25 +418,42 @@ def _child_env(cfg: ProbeConfig) -> dict[str, str]:
     for key in list(env):
         if _UNRELATED_SECRET_RE.search(key):
             env.pop(key, None)
-    backend = str(Path(__file__).resolve().parents[1])
-    env["PYTHONPATH"] = backend + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    # The child runs in a temp cwd, so anything relative must be made absolute here.
+    if env.get("METAFLOW_HOME"):
+        env["METAFLOW_HOME"] = _absolute(env["METAFLOW_HOME"])
+    extra = [_absolute(item) for item in env.get("PYTHONPATH", "").split(os.pathsep) if item]
+    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys([str(_BACKEND_DIR), *extra]))
     return env
+
+
+def build_child_command(interpreter: Interpreter, stage: str, payload: dict[str, Any]) -> list[str]:
+    return [interpreter.path, "-m", "backfill_dashboard.outerbounds_probe", "--child", json.dumps({"stage": stage, **payload})]
 
 
 def _run_child(stage: str, payload: dict[str, Any], cfg: ProbeConfig, secrets: tuple[str, ...]) -> dict[str, Any]:
     """Run one Metaflow stage in a child interpreter with a hard deadline."""
-    command = [sys.executable, "-m", "backfill_dashboard.outerbounds_probe", "--child", json.dumps({"stage": stage, **payload})]
+    interpreter = resolve_interpreter()
+    if not interpreter.ok:
+        return {"ok": False, "error_type": "interpreter_missing", "error": interpreter.error}
+    command = build_child_command(interpreter, stage, payload)
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=cfg.stage_timeout,
-            env=_child_env(cfg),
-            cwd=str(Path(__file__).resolve().parents[1]),
-        )
+        with tempfile.TemporaryDirectory(prefix="ob-probe-") as workdir:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=cfg.stage_timeout,
+                env=_child_env(cfg),
+                cwd=workdir,
+            )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error_type": "TimeoutError", "error": f"stage exceeded {cfg.stage_timeout:g}s (child killed)"}
+    except (FileNotFoundError, PermissionError, NotADirectoryError) as exc:
+        return {"ok": False, "error_type": "interpreter_missing",
+                "error": f"could not start {interpreter.path} ({interpreter.source}): {type(exc).__name__}: {exc.strerror or exc}"}
+    except OSError as exc:
+        return {"ok": False, "error_type": "child_launch_failed",
+                "error": redact(f"could not start {interpreter.path} ({interpreter.source}): {type(exc).__name__}: {exc}", secrets)[:400]}
     for line in reversed(completed.stdout.splitlines()):
         if line.startswith(_CHILD_MARKER):
             try:
@@ -406,6 +501,7 @@ def child_main(request: dict[str, Any]) -> dict[str, Any]:
         import metaflow  # noqa: F401 - the import itself is the check (resolves OB config)
 
         result["import_s"] = round(time.monotonic() - started, 2)
+        result["python"] = f"{sys.executable} ({sys.version.split()[0]})"
         result["metaflow_version"] = getattr(metaflow, "__version__", "?")
         if note:
             result["note"] = note
@@ -466,6 +562,9 @@ def stage_network(cfg: ProbeConfig, ctx: dict[str, Any]) -> dict[str, Any]:
     return _stage("network", status, "; ".join(lines), first_error, started)
 
 
+_LAUNCH_ERRORS = ("interpreter_missing", "child_launch_failed")
+
+
 def stage_packages(cfg: ProbeConfig, ctx: dict[str, Any]) -> dict[str, Any]:
     started = time.monotonic()
     keys = config_keys_presence()
@@ -473,11 +572,14 @@ def stage_packages(cfg: ProbeConfig, ctx: dict[str, Any]) -> dict[str, Any]:
     keys_text = f"config keys present: {', '.join(keys['present']) or 'none'}; credentials: {creds.source}"
     out = _run_child("packages", {"timeout": cfg.stage_timeout}, cfg, ctx["secrets"])
     ctx["metaflow_ok"] = bool(out.get("ok"))
+    if out.get("error_type") in _LAUNCH_ERRORS:
+        return _stage("packages", "fail", f"child interpreter unavailable: {out.get('error', '')}; {keys_text}", out.get("error_type"), started)
     if not out.get("ok"):
         return _stage("packages", "fail", f"metaflow import failed: {out.get('error', '')}; {keys_text}", out.get("error_type"), started)
     versions = ", ".join(f"{name}={version}" for name, version in (out.get("versions") or {}).items() if version)
     provider = str(out.get("metadata", "")).split("@")[0] or "?"
-    detail = f"metaflow {out.get('metaflow_version')} imported in {out.get('import_s')}s ({versions}); metadata provider: {provider}; {keys_text}"
+    detail = (f"metaflow {out.get('metaflow_version')} imported in {out.get('import_s')}s ({versions}); metadata provider: {provider}; "
+              f"{keys_text}; python: {out.get('python') or '?'}")
     return _stage("packages", "pass", detail, None, started)
 
 
@@ -531,6 +633,8 @@ def stage_list_runs(cfg: ProbeConfig, ctx: dict[str, Any]) -> dict[str, Any]:
         runs = out.get("runs") or []
         listed = ", ".join(f"{item['id']} ({'done' if item['finished'] else 'running'}, {item['created_at']})" for item in runs) or "no runs"
         return _stage("list_runs", "pass", f"Flow('{flow}').runs() via {provider} metadata: {len(runs)} latest: {listed}", None, started)
+    if out.get("error_type") in _LAUNCH_ERRORS:
+        return _stage("list_runs", "fail", f"child interpreter unavailable: {out.get('error', '')}", out.get("error_type"), started)
     expected = not ctx["credentials"].present
     detail = f"Flow('{flow}').runs() via {provider} metadata raised {out.get('error_type')}: {out.get('error', '')}"
     if expected:
@@ -655,7 +759,7 @@ def _main(argv: list[str]) -> int:
         safe = json.loads(redact(json.dumps(result), secrets))
         print(_CHILD_MARKER + json.dumps(safe), flush=True)
         return 0
-    # Manual diagnostics: python -m backfill_dashboard.outerbounds_probe [--flow NAME]
+    # Manual diagnostics (any cwd): PYTHONPATH=<repo>/backend python -m backfill_dashboard.outerbounds_probe [--flow NAME]
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     flow = argv[argv.index("--flow") + 1] if "--flow" in argv else None
     print(format_table(run_probe(flow=flow)))

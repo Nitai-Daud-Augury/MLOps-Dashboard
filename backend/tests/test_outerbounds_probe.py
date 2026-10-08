@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
 import sys
 from types import SimpleNamespace
@@ -22,6 +23,10 @@ CONFIG_URL = "https://api.augury.obp.outerbounds.com/v1/perimeters/default/abcde
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch, tmp_path, caplog):
+    # Import config first: it runs load_dotenv(.env) once, so a developer's local
+    # .env (e.g. OUTERBOUNDS_PROBE_ENABLED=1) cannot re-populate the keys cleared below.
+    import backfill_dashboard.config  # noqa: F401
+
     for key in list(probe.CONFIG_ENV_KEYS) + [
         "OUTERBOUNDS_PROBE_ENABLED", "OUTERBOUNDS_PROBE_TRIGGER_ENABLED", "OUTERBOUNDS_PROBE_STAGE_TIMEOUT_SECONDS",
     ]:
@@ -284,3 +289,178 @@ def test_child_env_drops_unrelated_secrets(monkeypatch):
     env = probe._child_env(probe.ProbeConfig.from_env())
     assert "MONGODB_URL" not in env and "FST_PROD_ACCOUNT_KEY" not in env
     assert env["PYTHONPATH"].split(":")[0].endswith("backend")
+
+
+# --- child interpreter / cwd independence -------------------------------------------
+
+class FakeRun:
+    """Stands in for subprocess.run: records the launch and answers like a child."""
+
+    def __init__(self, result=None):
+        self.calls: list[dict] = []
+        self.result = result or {"ok": True, "metadata": "local@/tmp", "metaflow_version": "2.19.34.1", "versions": {}}
+
+    def __call__(self, command, **kwargs):
+        self.calls.append({"command": command, **kwargs})
+        return SimpleNamespace(stdout=probe._CHILD_MARKER + json.dumps(self.result), stderr="", returncode=0)
+
+
+def _fake_python(directory, name="python", executable=True):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755 if executable else 0o644)
+    return path
+
+
+def _no_launch(command, **kwargs):
+    pytest.fail(f"child must not be launched with an unusable interpreter: {command[0]}")
+
+
+def test_launcher_defaults_to_sys_executable_from_foreign_cwd(monkeypatch, tmp_path):
+    workdir = tmp_path / "elsewhere"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)  # no .venv here, unlike the repo root
+    fake = FakeRun()
+    monkeypatch.setattr(probe.subprocess, "run", fake)
+
+    out = probe._run_child("packages", {"timeout": 5}, probe.ProbeConfig.from_env(), ())
+
+    assert out["ok"] is True
+    call = fake.calls[0]
+    command = call["command"]
+    assert command[0] == os.path.abspath(sys.executable) and os.path.isabs(command[0])
+    assert command[1:4] == ["-m", "backfill_dashboard.outerbounds_probe", "--child"]
+    assert not any(arg.startswith(("./", "../", ".venv")) for arg in command)
+    assert os.path.isabs(call["cwd"]) and call["cwd"] != str(workdir)
+    pythonpath = call["env"]["PYTHONPATH"].split(os.pathsep)
+    assert pythonpath[0] == str(probe._BACKEND_DIR) and all(os.path.isabs(item) for item in pythonpath)
+    assert os.path.isabs(call["env"]["METAFLOW_HOME"])
+
+
+def test_relative_sys_executable_resolves_against_startup_dir(monkeypatch, tmp_path):
+    """Databricks Apps starts the app as `.venv/bin/python`: sys.executable is relative
+    to the app root, and the old launcher resolved it against backend/ instead."""
+    app_root = tmp_path / "app"
+    python = _fake_python(app_root / ".venv" / "bin")
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.setattr(probe, "_STARTUP_CWD", str(app_root))
+    monkeypatch.setattr(probe.sys, "executable", ".venv/bin/python")
+    monkeypatch.chdir(other)
+
+    interpreter = probe.resolve_interpreter()
+
+    assert interpreter.ok and interpreter.source == "sys.executable"
+    assert interpreter.path == str(python)
+
+
+def test_real_child_launch_works_from_temp_cwd(monkeypatch, tmp_path):
+    """End to end: the child starts and answers from a cwd with no .venv / backend."""
+    monkeypatch.chdir(tmp_path)
+    out = probe._run_child("not-a-stage", {"timeout": 5}, probe.ProbeConfig.from_env(), ())
+    assert out.get("error_type") not in ("interpreter_missing", "child_launch_failed", "ChildProcessError", "TimeoutError"), out
+    assert out["ok"] is False  # unknown stage (or no metaflow) is reported by the child itself
+
+
+def test_valid_override_is_used(monkeypatch, tmp_path):
+    python = _fake_python(tmp_path / "custom" / "bin", "python3.11")
+    monkeypatch.setenv("OUTERBOUNDS_PROBE_PYTHON", str(python))
+    fake = FakeRun()
+    monkeypatch.setattr(probe.subprocess, "run", fake)
+
+    interpreter = probe.resolve_interpreter()
+    probe._run_child("packages", {"timeout": 5}, probe.ProbeConfig.from_env(), ())
+
+    assert interpreter.ok and interpreter.source == "OUTERBOUNDS_PROBE_PYTHON" and interpreter.path == str(python)
+    assert fake.calls[0]["command"][0] == str(python)
+
+
+def test_relative_override_is_made_absolute(monkeypatch, tmp_path):
+    python = _fake_python(tmp_path / "venv" / "bin")
+    monkeypatch.setattr(probe, "_STARTUP_CWD", str(tmp_path))
+    monkeypatch.setenv("OUTERBOUNDS_PROBE_PYTHON", "venv/bin/python")
+    assert probe.resolve_interpreter().path == str(python)
+
+
+@pytest.mark.parametrize("kind", ["missing", "not_executable", "directory"])
+def test_invalid_override_fails_cleanly_and_other_stages_run(monkeypatch, tmp_path, caplog, kind):
+    if kind == "missing":
+        target = tmp_path / "nope" / "python"
+    elif kind == "not_executable":
+        target = _fake_python(tmp_path / "bin", executable=False)
+    else:
+        target = tmp_path / "bin"
+        target.mkdir()
+    monkeypatch.setenv("OUTERBOUNDS_PROBE_PYTHON", str(target))
+    monkeypatch.setattr(probe.subprocess, "run", _no_launch)
+    _ok_network(monkeypatch)
+    monkeypatch.setattr(probe, "_http_get", _http(403))
+
+    result = probe.run_probe()
+    stages = _by_id(result)
+
+    for stage_id in ("packages", "list_runs"):
+        assert stages[stage_id]["status"] == "fail"
+        assert stages[stage_id]["error_type"] == "interpreter_missing"
+        assert str(target) in stages[stage_id]["detail"]
+        assert "Traceback" not in stages[stage_id]["detail"] and "probe error" not in stages[stage_id]["detail"]
+    assert stages["network"]["status"] == "pass"
+    assert stages["auth"]["status"] == "expected_fail"
+    assert stages["trigger"]["status"] == "skip"
+    assert result["overall"] == "fail"
+    assert "Traceback" not in caplog.text
+    status = probe.describe_config()["python"]
+    assert status["ok"] is False and status["path"] == str(target)
+
+
+def test_unusable_sys_executable_fails_cleanly(monkeypatch, tmp_path):
+    monkeypatch.setattr(probe, "_STARTUP_CWD", str(tmp_path))
+    monkeypatch.setattr(probe.sys, "executable", ".venv/bin/python")
+    monkeypatch.setattr(probe.sys, "prefix", str(tmp_path / "noprefix"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(probe.subprocess, "run", _no_launch)
+
+    out = probe._run_child("packages", {"timeout": 5}, probe.ProbeConfig.from_env(), ())
+
+    assert out["error_type"] == "interpreter_missing"
+    assert str(tmp_path / ".venv" / "bin" / "python") in out["error"]
+    assert "OUTERBOUNDS_PROBE_PYTHON" in out["error"]
+
+
+def test_launch_oserror_is_interpreter_missing_not_traceback(monkeypatch):
+    def boom(command, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", command[0])
+
+    monkeypatch.setattr(probe.subprocess, "run", boom)
+    out = probe._run_child("list_runs", {"flow": "FSTBackfill", "timeout": 5}, probe.ProbeConfig.from_env(), ())
+    assert out["error_type"] == "interpreter_missing"
+    assert "No such file or directory" in out["error"]
+
+
+def test_interpreter_failure_does_not_leak_token(monkeypatch, tmp_path, caplog):
+    from backfill_dashboard import app as app_module
+
+    _with_token(monkeypatch, tmp_path)
+    monkeypatch.setenv("OUTERBOUNDS_PROBE_ENABLED", "1")
+    monkeypatch.setenv("OUTERBOUNDS_PROBE_PYTHON", str(tmp_path / "missing-python"))
+    monkeypatch.setattr(probe.subprocess, "run", _no_launch)
+    _ok_network(monkeypatch)
+    monkeypatch.setattr(probe, "_http_get", _http(200, json_body={"config": {"A": "x"}}))
+
+    response = _request(app_module.app, "POST", "/api/diagnostics/outerbounds", {"flow": "FSTBackfill"})
+    status = _request(app_module.app, "GET", "/api/diagnostics/outerbounds/status")
+
+    assert response.status_code == 200
+    assert _by_id(response.body)["packages"]["error_type"] == "interpreter_missing"
+    text = json.dumps(response.body) + json.dumps(status.body) + caplog.text
+    assert TOKEN not in text and "abcdefghijklmnop0123" not in text
+
+
+def test_relative_metaflow_home_is_absolute_in_child_env(monkeypatch, tmp_path):
+    monkeypatch.setattr(probe, "_STARTUP_CWD", str(tmp_path))
+    monkeypatch.setenv("METAFLOW_HOME", "mfconfig")
+    env = probe._child_env(probe.ProbeConfig.from_env())
+    assert env["METAFLOW_HOME"] == str(tmp_path / "mfconfig")
+    assert probe._metaflow_home() == tmp_path / "mfconfig"
+
