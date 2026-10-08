@@ -43,10 +43,14 @@ class BackfillDecisionPolicy:
                 missing_features=[],
                 zero_count_features=[],
             )
-        if partition and not installation_start and coverage_start and (partition.year, partition.month) < coverage_start:
+        # ``coverage_start`` is the machine's data start: the earliest of its
+        # lifecycle first-recorded month and its first FST partition. A missing
+        # month before it has no source data under every lifecycle source, even
+        # when an (earlier) installation / created_at date is known.
+        if partition and coverage_start and (partition.year, partition.month) < coverage_start:
             return BackfillDecision(
                 status="no_source_data",
-                reason="Month predates this machine's first observed Feature Store partition.",
+                reason="Month predates this machine's first recorded data / first observed Feature Store partition.",
                 recommended_action="Excluded from coverage until source data availability is established.",
                 missing_features=[],
                 zero_count_features=[],

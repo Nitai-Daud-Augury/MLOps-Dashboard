@@ -101,9 +101,18 @@ class Settings:
     )
     scan_workers: int = int(os.getenv("BACKFILL_SCAN_WORKERS", "12"))
     silver_enabled: bool = os.getenv("DATABRICKS_SILVER_ENABLED", "0") == "1"
-    silver_table: str = os.getenv("DATABRICKS_SILVER_TABLE", "dih_prod.silver_mh.features")
-    databricks_profile: str = os.getenv("DATABRICKS_PROFILE", "Augury")
+    silver_table: str = os.getenv("DATABRICKS_SILVER_TABLE", "dih_prod.silver_mh.feature_store")
+    # Only used outside Databricks Apps, and only when set; unset means the SDK
+    # default auth chain (see silver._create_config).
+    databricks_profile: str = os.getenv("DATABRICKS_PROFILE", "")
     warehouse_id: str = os.getenv("DATABRICKS_WAREHOUSE_ID", "6ed9ddd0b2661edc")
+    lifecycle_source: str = os.getenv("LIFECYCLE_SOURCE", "mongo")
+    # Prefer DATABRICKS_MACHINES_RAW_TABLE; legacy DATABRICKS_EQUIPMENT_TABLE still accepted.
+    equipment_table: str = (
+        os.getenv("DATABRICKS_MACHINES_RAW_TABLE")
+        or os.getenv("DATABRICKS_EQUIPMENT_TABLE")
+        or "dih_prod.bronze_augury_mh_mongodb.machines_raw"
+    )
     no_data_before_year: int = int(os.getenv("ULRPM_NO_DATA_BEFORE_YEAR", "2025"))
     no_data_before_month: int = int(os.getenv("ULRPM_NO_DATA_BEFORE_MONTH", "5"))
     mongodb_database: str = os.getenv("MONGODB_DATABASE", "production")

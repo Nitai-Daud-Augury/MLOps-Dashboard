@@ -18,6 +18,11 @@ class MachineStatus:
     online_months: int; offline_months: int; pre_install_months: int
     months: list[MonthStatus]
     display_name: str = ""; is_test_machine: bool = False
+    crosscheck: dict | None = None
+    # Lifecycle provenance for this scan: source that ran (databricks|mongo|None)
+    # and whether it returned a record for this machine.
+    lifecycle_source: str | None = None
+    lifecycle_enriched: bool = False
 
 
 @dataclass
@@ -33,6 +38,7 @@ class DashboardSnapshot:
     scan_id: str; generated_at: str; source_account: str; source_container: str
     target_features: list[str]; summary: DashboardSummary; machines: list[MachineStatus]
     warnings: list[str] = field(default_factory=list)
+    crosscheck: dict | None = None
 
     @classmethod
     def empty(cls, *, account: str, container: str, target_features: list[str]) -> "DashboardSnapshot":

@@ -5,6 +5,7 @@ import os
 import re
 from typing import Any, Sequence
 
+from . import data_source_log as ds_log
 from .inventory_models import MachineFacets, MachinePage, MachineRecord, MachineSearchQuery
 from .inventory_provider import _counts, _record, decode_cursor, encode_cursor
 
@@ -58,7 +59,7 @@ class MongoMachineInventoryProvider:
         if not rows:
             return []
         ids = [row.get(self.machine_id_field, row["_id"]) for row in rows]
-        machines = {row["_id"]: row for row in self.machines.find({"_id": {"$in": ids}}, {"_id": 1, "name": 1, "display_name": 1, "tags": 1, "siteId": 1, "siteName": 1, "organizationId": 1, "organizationName": 1, "status": 1, "archived": 1, "updated_at": 1, "updatedAt": 1, "lastRecorded": 1, "last_recorded_at": 1, "lastRecordedAt": 1})}
+        machines = {row["_id"]: row for row in self.machines.find({"_id": {"$in": ids}}, {"_id": 1, "name": 1, "display_name": 1, "tags": 1, "siteId": 1, "siteName": 1, "organizationId": 1, "organizationName": 1, "status": 1, "archived": 1, "updated_at": 1, "updatedAt": 1, "lastRecorded": 1, "last_recorded_at": 1, "lastRecordedAt": 1, "firstRecorded": 1, "first_recorded_at": 1, "firstRecordedAt": 1})}
         endpoint_map: dict[Any, list[dict[str, Any]]] = {value: [] for value in ids}
         endpoint_projection = {
             self.endpoint_machine_field: 1,
@@ -132,18 +133,27 @@ class MongoMachineInventoryProvider:
 def build_mongo_provider() -> tuple[MongoMachineInventoryProvider | None, str]:
     import os
     url = os.getenv("MONGODB_URL") or os.getenv("MONGODB_URI")
+    credential_source = "env MONGODB_URL/MONGODB_URI" if url else None
     if not url and os.getenv("MONGODB_KEY_VAULT_ENABLED", "1").lower() not in {"0", "false", "no", "off"}:
+        vault_name = os.getenv("MONGODB_KEY_VAULT_NAME", "metaflow-iac-kv")
         try:
             from azure.identity import DefaultAzureCredential
             from azure.keyvault.secrets import SecretClient
-            vault_name = os.getenv("MONGODB_KEY_VAULT_NAME", "metaflow-iac-kv")
             url = SecretClient(vault_url=f"https://{vault_name}.vault.azure.net", credential=DefaultAzureCredential()).get_secret("mongodb-url").value
-        except Exception:
+            credential_source = f"key vault {vault_name}"
+        except Exception as exc:
             url = None
+            ds_log.warning(
+                f"mongo credentials: MONGODB_URL unset and key vault {vault_name} lookup failed: "
+                f"{ds_log.error_text(exc)} -> trying MONGODB_ENDPOINT/USERNAME/PASSWORD env"
+            )
     username = os.getenv("MONGODB_USERNAME")
     password = os.getenv("MONGODB_PASSWORD")
     endpoint = os.getenv("MONGODB_ENDPOINT") or os.getenv("MONGODB_HOST")
+    if username and password:
+        credential_source = "env MONGODB_USERNAME/MONGODB_PASSWORD"
     if not url and not (endpoint and username and password):
+        ds_log.warning("mongo lifecycle provider: no Mongo credentials configured -> status not_configured")
         return None, "not_configured"
     try:
         from pymongo import MongoClient
@@ -162,16 +172,23 @@ def build_mongo_provider() -> tuple[MongoMachineInventoryProvider | None, str]:
         client.admin.command("ping")
         database = os.getenv("MONGODB_DATABASE", "production")
         collection = os.getenv("MONGODB_COLLECTION", "machines")
+        ds_log.info(f"mongo lifecycle provider: connected (credentials from {credential_source}, database={database})")
         return MongoMachineInventoryProvider(
             client, database, collection,
             os.getenv("MONGODB_CONFIGURATION_COLLECTION", "machine_configurations"),
             os.getenv("MONGODB_ENDPOINT_COLLECTION", "endpoints"),
         ), "healthy"
     except ModuleNotFoundError:
+        ds_log.warning("mongo lifecycle provider: pymongo missing -> status dependency_missing")
         return None, "dependency_missing"
     except Exception as exc:
         text = str(exc).lower()
-        return None, "unauthorized" if "auth" in text or "not authorized" in text else "unreachable"
+        status = "unauthorized" if "auth" in text or "not authorized" in text else "unreachable"
+        ds_log.warning(
+            f"mongo lifecycle provider: connect/ping failed (credentials from {credential_source}): "
+            f"{ds_log.error_text(exc)} -> status {status}"
+        )
+        return None, status
 
 
 def _inline_endpoints(document: dict[str, Any]) -> list[dict[str, Any]]:

@@ -830,6 +830,32 @@ tbody tr:last-child td {
   text-transform: none;
 }
 
+/* FEATURES_CROSSCHECK mismatch marker (informational; never a status). */
+.month-crosscheck-flag {
+  background: #7c3aed;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 14px;
+  min-width: 14px;
+  bottom: 3px;
+  position: absolute;
+  right: 3px;
+  text-align: center;
+}
+
+.month-crosscheck-flag.stale {
+  background: #64748b;
+}
+
+.month-crosscheck-flag.legend-flag {
+  display: inline-block;
+  margin-right: 4px;
+  position: static;
+}
+
 .month-cell.activity-online::before,
 .month-cell.activity-offline::before,
 .month-cell.activity-not_installed::before,

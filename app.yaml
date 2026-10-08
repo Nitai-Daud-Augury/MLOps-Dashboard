@@ -10,6 +10,36 @@ env:
     value: "0"
   - name: ULRPM_MACHINE_IDS_FILE
     value: data/unique_machine_ids.txt
+  # Lifecycle enrichment (names, installation dates, cutoffs) from the bronze
+  # Mongo mirror via the bound SQL warehouse. Auth is the app service principal
+  # (injected DATABRICKS_HOST/CLIENT_ID/CLIENT_SECRET); no DATABRICKS_PROFILE here.
+  - name: LIFECYCLE_SOURCE
+    value: databricks
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: DATABRICKS_MACHINES_RAW_TABLE
+    value: dih_prod.bronze_augury_mh_mongodb.machines_raw
+  - name: LIFECYCLE_DATABRICKS_TIMEOUT_SECONDS
+    value: "45"
+  - name: LIFECYCLE_DATABRICKS_COLD_TIMEOUT_SECONDS
+    value: "180"
+  # FST blob scan fan-out. BACKFILL_BLOB_POOL_SIZE is optional (auto-sized from
+  # the worker count when unset).
+  - name: BACKFILL_SCAN_WORKERS
+    value: "12"
+  # Informational blob-vs-Databricks feature_store cross-check. Off in the app
+  # until the app service principal has SELECT on both tables below; set to
+  # "feature_store" to enable (fail-open: never changes scan statuses).
+  - name: FEATURES_CROSSCHECK
+    value: "off"
+  - name: DATABRICKS_FEATURE_STORE_TABLE
+    value: dih_prod.silver_mh.feature_store
+  - name: DATABRICKS_FEATURE_STORE_BRONZE_TABLE
+    value: dih_prod.bronze_augury_mh_blob.feature_store
+  - name: FEATURES_CROSSCHECK_ROW_TOLERANCE
+    value: "0.1"
+  - name: FEATURES_CROSSCHECK_TIMEOUT_SECONDS
+    value: "300"
   - name: MONGODB_URL
     valueFrom: mongodb_url
   - name: FST_PROD_ACCOUNT_NAME

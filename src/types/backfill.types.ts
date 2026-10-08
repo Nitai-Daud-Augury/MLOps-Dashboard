@@ -42,6 +42,25 @@ export interface MonthStatus {
   missing_schema_columns: string[];
   error?: string;
   activity_status?: ActivityStatus;
+  crosscheck?: MonthCrosscheck | null;
+}
+
+/** Informational FEATURES_CROSSCHECK annotation (blob vs feature_store). Never changes status. */
+export type CrosscheckFlag = 'row_ratio' | 'v2_presence' | 'missing_in_feature_store' | 'missing_in_blob' | 'feature_store_stale';
+export interface MonthCrosscheck {
+  status: 'match' | 'mismatch' | 'absent_both' | 'not_checked' | 'feature_store_stale';
+  flags: CrosscheckFlag[];
+  /** Differences found while the Databricks copy was stale; not judged as mismatches. */
+  suppressed_flags?: CrosscheckFlag[];
+  stale_reason?: string;
+  blob_modified?: string | null;
+  bronze_modified?: string | null;
+  blob_rows?: number;
+  feature_store_rows?: number;
+  row_ratio?: number | null;
+  v2_blob_only?: string[];
+  v2_feature_store_only?: string[];
+  detail?: string;
 }
 
 export type ActiveMonthState =

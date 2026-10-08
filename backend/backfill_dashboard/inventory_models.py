@@ -28,6 +28,9 @@ class MachineRecord:
     source_updated_at: str | None = None
     last_recorded_at: str | None = None
     installation_at: str | None = None
+    # Earliest recorded sample (Mongo machines.firstRecorded.timestamp /
+    # bronze raw_json:firstRecorded:timestamp); the shared data-start boundary.
+    first_recorded_at: str | None = None
     inventory_version: str = ""
 
 

@@ -670,7 +670,7 @@ function MonitorTab({
                     tabIndex={0}
                     title="Open detailed machine view in a new tab"
                   >
-                    <td className="machine-id-cell"><div className="machine-identity"><span className="machine-identity-label">{machine.display_name && machine.display_name !== machine.machine_id ? machine.display_name : machine.machine_id}<small className="mono machine-identity-id">{machine.display_name && machine.display_name !== machine.machine_id ? machine.machine_id : ''}</small></span><TestMachineBadge isTest={machine.is_test_machine} /><CopyMachineIdButton machineId={machine.machine_id} onCopied={() => onToast('success', 'Machine ID copied.')} /></div></td>
+                    <td className="machine-id-cell"><div className="machine-identity"><span className="machine-identity-label" title={lifecycleSourceTitle(machine)}>{machine.display_name && machine.display_name !== machine.machine_id ? machine.display_name : machine.machine_id}<small className="mono machine-identity-id">{machine.display_name && machine.display_name !== machine.machine_id ? machine.machine_id : ''}</small></span><TestMachineBadge isTest={machine.is_test_machine} /><CopyMachineIdButton machineId={machine.machine_id} onCopied={() => onToast('success', 'Machine ID copied.')} /></div></td>
                     <td><StatusPill status={machine.status} /></td>
                     <td><Progress value={machine.months_complete} max={machine.months_expected} /></td>
                     <td>{machine.installation_at ? formatTimestamp(machine.installation_at) : 'Unknown'}</td>
@@ -3046,6 +3046,8 @@ function MachineDetails({
   const selectedMonth = targetMonths[selectedIdx]
     ?? targetMonths.find((month) => month.status === 'needs_backfill')
     ?? targetMonths[0];
+  const hasCrosscheckFlags = targetMonths.some((month) => month.crosscheck?.status === 'mismatch');
+  const hasStaleCrosscheck = targetMonths.some((month) => isStaleWithDifferences(month));
   return (
     <div className={`details-grid${compact ? ' quick-details-grid' : ''}`}>
       <div className="month-coverage">
@@ -3060,6 +3062,8 @@ function MachineDetails({
                   const active = activeMonths[fixedMonthIndex];
                   const canBackfill = isMonthBackfillable(month) && !active && !backfillDisabled;
                   const activityStatus = activityForMonth(month);
+                  const crosscheckNote = crosscheckSummary(month);
+                  const crosscheckStale = month.crosscheck?.status === 'feature_store_stale';
                   const nonBackfillableReason = activityStatus === 'offline'
                     ? 'Offline — no FST data; backfill disabled to protect the pipeline'
                     : activityStatus === 'not_installed'
@@ -3072,7 +3076,7 @@ function MachineDetails({
                     aria-pressed={onToggleBackfillMonth ? isSelectedForBackfill : undefined}
                     className={`month-cell ${month.status} activity-${activityStatus}${!isMonthBackfillable(month) ? ' non-backfillable' : ''}${active ? ` active-month ${active.state}` : ''}${fixedMonthIndex === runningMonthIndex ? ' running-month' : ''}${index === selectedIdx ? ' selected' : ''}${isSelectedForBackfill ? ' backfill-selected' : ''}`}
                     key={`${month.partition.label}-${month.partition.index}`}
-                    title={active ? `${month.partition.label}: ${active.state}${active.parent_workflow_id ? ` · ${active.parent_workflow_id}` : ''}` : isMonthBackfillable(month) ? (onToggleBackfillMonth ? `${month.partition.label}: click to ${isSelectedForBackfill ? 'remove from' : 'add to'} backfill selection` : `${month.partition.label}: ${month.reason}`) : `${month.partition.label}: ${nonBackfillableReason}`}
+                    title={`${active ? `${month.partition.label}: ${active.state}${active.parent_workflow_id ? ` · ${active.parent_workflow_id}` : ''}` : isMonthBackfillable(month) ? (onToggleBackfillMonth ? `${month.partition.label}: click to ${isSelectedForBackfill ? 'remove from' : 'add to'} backfill selection` : `${month.partition.label}: ${month.reason}`) : `${month.partition.label}: ${nonBackfillableReason}`}${crosscheckNote ? `\n${crosscheckNote}` : ''}`}
                     type="button"
                     disabled={!isMonthBackfillable(month) || (Boolean(onToggleBackfillMonth) && !canBackfill)}
                     onClick={() => {
@@ -3083,6 +3087,8 @@ function MachineDetails({
                     <span>{new Date(month.partition.year, month.partition.month - 1).toLocaleString('en', { month: 'short' })}</span>
                     {active ? <small>{active.state.replace('_', ' ')}</small> : null}
                     <small className="month-activity-label">{labelForActivity(activityStatus)}</small>
+                    {crosscheckNote && !crosscheckStale ? <i className="month-crosscheck-flag" aria-label={crosscheckNote}>≠</i> : null}
+                    {crosscheckNote && crosscheckStale && isStaleWithDifferences(month) ? <i className="month-crosscheck-flag stale" aria-label={crosscheckNote}>⏱</i> : null}
                   </button>;
                 })}
               </div>
@@ -3096,6 +3102,8 @@ function MachineDetails({
           <span className="legend-item backfilled"><i className="legend-box backfilled" />Backfilled</span>
           <span className="legend-item needs_backfill"><i className="legend-box needs_backfill" />Needs backfill</span>
           <span className="legend-item scan_error"><i className="legend-box scan_error" />Scan error</span>
+          {hasCrosscheckFlags ? <span className="legend-item crosscheck-flag"><i className="month-crosscheck-flag legend-flag">≠</i>Feature Store cross-check mismatch (info only)</span> : null}
+          {hasStaleCrosscheck ? <span className="legend-item crosscheck-flag"><i className="month-crosscheck-flag stale legend-flag">⏱</i>Databricks copy is older than blob (not compared)</span> : null}
           {onToggleBackfillMonth ? <span className="legend-item backfill-selection"><i className="legend-box backfill-selection" />Selected for backfill</span> : null}
         </div>
       </div>
@@ -3540,3 +3548,30 @@ function backfillRangesForMonths(months: MonthStatus[]) {
 }
 
 export default App;
+
+function lifecycleSourceTitle(machine: MachineStatus): string {
+  if (!machine.lifecycle_source) return 'Lifecycle source: none (no lifecycle enrichment on the last scan)';
+  return `Lifecycle source: ${machine.lifecycle_source} (${machine.lifecycle_enriched ? 'enriched' : 'not enriched: no record returned'})`;
+}
+
+function isStaleWithDifferences(month: MonthStatus): boolean {
+  return month.crosscheck?.status === 'feature_store_stale' && Boolean(month.crosscheck.suppressed_flags?.length);
+}
+
+function crosscheckSummary(month: MonthStatus): string | null {
+  const check = month.crosscheck;
+  if (!check) return null;
+  if (check.status === 'feature_store_stale') {
+    const when = `blob modified ${check.blob_modified ?? 'unknown'}, Databricks copy ${check.bronze_modified ?? 'none'}`;
+    const hidden = check.suppressed_flags?.length ? `; not compared: ${check.suppressed_flags.join(', ')}` : '';
+    return `Feature Store cross-check skipped: ${check.stale_reason ?? 'Databricks copy is older than blob'} (${when})${hidden}`;
+  }
+  if (check.status !== 'mismatch') return null;
+  const parts = check.flags.map((flag) => {
+    if (flag === 'row_ratio') return `rows blob ${check.blob_rows ?? 0} vs feature_store ${check.feature_store_rows ?? 0} (ratio ${check.row_ratio ?? '?'})`;
+    if (flag === 'v2_presence') return `v2 presence differs${check.v2_blob_only?.length ? `; blob only: ${check.v2_blob_only.join(', ')}` : ''}${check.v2_feature_store_only?.length ? `; feature_store only: ${check.v2_feature_store_only.join(', ')}` : ''}`;
+    if (flag === 'missing_in_feature_store') return `missing in feature_store (blob rows ${check.blob_rows ?? 0})`;
+    return `missing in blob (feature_store rows ${check.feature_store_rows ?? 0})`;
+  });
+  return `Feature Store cross-check (info only, status from blob): ${parts.join('; ')}`;
+}

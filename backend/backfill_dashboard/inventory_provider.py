@@ -32,11 +32,15 @@ def _record(document: dict[str, Any], version: str) -> MachineRecord:
     if isinstance(last_recorded, dict):
         last_recorded = last_recorded.get("timestamp")
     installation_at = _installation_at(document, endpoints)
+    first_recorded = document.get("firstRecorded", document.get("first_recorded_at", document.get("firstRecordedAt")))
+    if isinstance(first_recorded, dict):
+        first_recorded = first_recorded.get("timestamp")
     display_name = str(document.get("display_name", document.get("name", machine_id)))
+    organization_name = document.get("organization_name", document.get("organizationName"))
     return MachineRecord(
         machine_id=machine_id,
         display_name=display_name,
-        is_test_machine=_is_test_machine(display_name, tags),
+        is_test_machine=_is_test_machine(display_name, tags, organization_name),
         site_id=_optional_str(document.get("site_id", document.get("siteId"))),
         site_name=document.get("site_name", document.get("siteName")),
         organization_id=_optional_str(document.get("organization_id", document.get("organizationId"))),
@@ -53,14 +57,31 @@ def _record(document: dict[str, Any], version: str) -> MachineRecord:
         source_updated_at=_optional_iso(document.get("updated_at", document.get("updatedAt"))),
         last_recorded_at=_optional_iso(last_recorded),
         installation_at=installation_at,
+        first_recorded_at=_optional_iso(first_recorded),
         inventory_version=version,
     )
 
 
-def _is_test_machine(display_name: str, tags: Any) -> bool:
-    """Identify test inventory from descriptive metadata, never from machine IDs."""
+_TEST_COMPANY_NAMES = frozenset(
+    {
+        "qa",
+        "demo",
+        "hagay test lab",
+        "dynamicsscopingtest",
+    }
+)
+
+
+def _is_test_machine(display_name: str, tags: Any, organization_name: Any = None) -> bool:
+    """Identify test inventory from descriptive metadata, never from machine IDs.
+
+    Combines: name/tag word heuristics (test/e2e/qa), known test company names,
+    and (separately, via file registry / scanner) ``data/test_machine_ids.txt``.
+    """
     import re
 
+    if organization_name is not None and str(organization_name).strip().lower() in _TEST_COMPANY_NAMES:
+        return True
     metadata = [display_name]
     if isinstance(tags, str):
         metadata.append(tags)

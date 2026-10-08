@@ -41,3 +41,18 @@ Thumbs.db
 
 # Local Node poll contract check (pytest covers the same; not in CI)
 scripts/check-admin-action-poll.mjs
+
+# --- local-only artifacts that must never be committed ---
+# Databricks bundle local state (created by `databricks bundle validate/deploy`)
+.databricks/
+.databrickscfg
+# Keys / credentials
+*.pem
+*.key
+*.p12
+*.pfx
+# Local snapshots / scratch copies next to the repo
+pre_edit_snapshot/
+Augury repos/
+MLOps research/
+*_snapshot*.json

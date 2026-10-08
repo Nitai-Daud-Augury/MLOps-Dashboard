@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS inventory (
  resource_cohort TEXT NOT NULL, classification_reason TEXT NOT NULL,
  classification_source_version TEXT NOT NULL, backfill_eligible INTEGER NOT NULL,
  exclusion_reason TEXT, source_updated_at TEXT, last_recorded_at TEXT, installation_at TEXT,
- inventory_version TEXT NOT NULL);
+ first_recorded_at TEXT, inventory_version TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS inventory_stage AS SELECT * FROM inventory WHERE 0;
 CREATE TABLE IF NOT EXISTS estimates (
  id TEXT PRIMARY KEY, signature TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,

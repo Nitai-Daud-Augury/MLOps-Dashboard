@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -94,17 +95,126 @@ class BlobStore(Protocol):
         ...
 
 
-@dataclass
-class AzureBlobStore:
-    account_name: str
-    container_name: str
-    _cached_container: object = field(default=None, init=False, repr=False, compare=False)
-    _cached_arrow_filesystem: object = field(default=None, init=False, repr=False, compare=False)
+# ---------------------------------------------------------------------------
+# Process-wide shared Azure Blob clients
+# ---------------------------------------------------------------------------
+# The FST scan fans out over ``BACKFILL_SCAN_WORKERS`` threads that all talk to
+# the same storage account. azure-core's default RequestsTransport mounts a
+# requests HTTPAdapter with urllib3's default ``pool_maxsize=10``; with more
+# concurrent workers than that, urllib3 logs "Connection pool is full,
+# discarding connection" and throws away keep-alive sockets (extra TLS
+# handshakes). The API also built a fresh AzureBlobStore (and therefore a fresh
+# ContainerClient + connection pool) for every scan request. We now build exactly
+# one ContainerClient per (account, container, credential identity) for the whole
+# process, backed by a requests.Session whose pool is sized from the configured
+# worker count.
 
-    def _container(self):
-        if self._cached_container is not None:
-            return self._cached_container
+_DEFAULT_SCAN_WORKERS = 12
+_POOL_HEADROOM = 4
+_MIN_POOL_SIZE = 10  # never below urllib3/requests' default
+_SHARED_CLIENT_LOCK = threading.Lock()
+_SHARED_CONTAINER_CLIENTS: dict[tuple, object] = {}
+_SHARED_DEFAULT_CREDENTIAL: object | None = None
 
+_CLIENT_OPTIONS = {
+    "connection_timeout": 10,
+    "read_timeout": 60,
+    "retry_total": 2,
+    "retry_backoff_factor": 0.5,
+}
+
+
+def configured_scan_workers() -> int:
+    """Worker count used by the scanner (``BACKFILL_SCAN_WORKERS``, default 12)."""
+    try:
+        return max(1, int(os.getenv("BACKFILL_SCAN_WORKERS", str(_DEFAULT_SCAN_WORKERS))))
+    except ValueError:
+        return _DEFAULT_SCAN_WORKERS
+
+
+def blob_pool_size(scan_workers: int | None = None) -> int:
+    """HTTP connection pool size for the shared blob client.
+
+    Always ``>= scan_workers``: workers + small headroom for the coverage
+    discovery / metadata calls that run alongside (floor 10, the old
+    default). ``BACKFILL_BLOB_POOL_SIZE``
+    may raise it further but can never shrink it below workers + headroom.
+    """
+    workers = max(1, int(scan_workers if scan_workers is not None else configured_scan_workers()))
+    size = max(workers + _POOL_HEADROOM, _MIN_POOL_SIZE)
+    override = os.getenv("BACKFILL_BLOB_POOL_SIZE", "").strip()
+    if override:
+        try:
+            size = max(size, int(override))
+        except ValueError:
+            pass
+    return size
+
+
+def _credential_identity(account_key: str | None, sas_token: str | None) -> tuple[str, str]:
+    """Stable, non-reversible identity of the credential, used only as a cache key.
+
+    Only a short SHA-256 digest is kept so the secret never lands in a cache
+    key, repr, or log line.
+    """
+    if account_key:
+        return ("account_key", hashlib.sha256(account_key.encode("utf-8")).hexdigest()[:16])
+    if sas_token:
+        return ("sas_token", hashlib.sha256(sas_token.encode("utf-8")).hexdigest()[:16])
+    return ("default_azure_credential", "")
+
+
+def _build_pooled_transport(pool_size: int):
+    import requests
+    from urllib3.util.retry import Retry
+    from azure.core.pipeline.transport import RequestsTransport
+
+    try:
+        from azure.core.pipeline.transport._bigger_block_size_http_adapters import (
+            BiggerBlockSizeHTTPAdapter as _Adapter,
+        )
+    except ImportError:  # pragma: no cover - other azure-core layouts
+        from requests.adapters import HTTPAdapter as _Adapter
+
+    session = requests.Session()
+    # Mirror RequestsTransport._init_session: azure-core owns retries via its
+    # RetryPolicy, so the adapter itself must not retry.
+    adapter = _Adapter(
+        pool_connections=pool_size,
+        pool_maxsize=pool_size,
+        max_retries=Retry(total=False, redirect=False, raise_on_status=False),
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    # session_owner=False: closing one client must never tear down the shared
+    # session used by every scanner worker.
+    return RequestsTransport(
+        session=session,
+        session_owner=False,
+        connection_timeout=_CLIENT_OPTIONS["connection_timeout"],
+        read_timeout=_CLIENT_OPTIONS["read_timeout"],
+    )
+
+
+def get_shared_container_client(account_name: str, container_name: str, pool_size: int | None = None):
+    """Return the process-wide ContainerClient for ``account/container``.
+
+    Thread-safe: the first caller builds the client under a lock; every other
+    caller (any thread, any AzureBlobStore instance) gets the same instance.
+    Credential resolution is unchanged: FST_PROD_ACCOUNT_KEY / AZURE_STORAGE_KEY,
+    then FST_PROD_SAS_TOKEN / AZURE_STORAGE_SAS_TOKEN, then DefaultAzureCredential.
+    """
+    global _SHARED_DEFAULT_CREDENTIAL
+    account_key = os.getenv("FST_PROD_ACCOUNT_KEY") or os.getenv("AZURE_STORAGE_KEY")
+    sas_token = os.getenv("FST_PROD_SAS_TOKEN") or os.getenv("AZURE_STORAGE_SAS_TOKEN")
+    key = (account_name, container_name, _credential_identity(account_key, sas_token))
+    client = _SHARED_CONTAINER_CLIENTS.get(key)
+    if client is not None:
+        return client
+    with _SHARED_CLIENT_LOCK:
+        client = _SHARED_CONTAINER_CLIENTS.get(key)
+        if client is not None:
+            return client
         try:
             from azure.identity import DefaultAzureCredential
             from azure.storage.blob import ContainerClient
@@ -114,26 +224,54 @@ class AzureBlobStore:
                 "or run tests with a fake BlobStore."
             ) from exc
 
-        account_url = f"https://{self.account_name}.blob.core.windows.net"
-        account_key = os.getenv("FST_PROD_ACCOUNT_KEY") or os.getenv("AZURE_STORAGE_KEY")
-        sas_token = os.getenv("FST_PROD_SAS_TOKEN") or os.getenv("AZURE_STORAGE_SAS_TOKEN")
-        client_options = {
-            "connection_timeout": 10,
-            "read_timeout": 60,
-            "retry_total": 2,
-            "retry_backoff_factor": 0.5,
-        }
+        size = max(pool_size or 0, blob_pool_size())
         if account_key:
-            client = ContainerClient(account_url, self.container_name, credential=account_key, **client_options)
+            credential = account_key
         elif sas_token:
-            client = ContainerClient(account_url, self.container_name, credential=sas_token, **client_options)
+            credential = sas_token
         else:
-            client = ContainerClient(
-                account_url,
-                self.container_name,
-                credential=DefaultAzureCredential(),
-                **client_options,
-            )
+            if _SHARED_DEFAULT_CREDENTIAL is None:
+                _SHARED_DEFAULT_CREDENTIAL = DefaultAzureCredential()
+            credential = _SHARED_DEFAULT_CREDENTIAL
+        client = ContainerClient(
+            f"https://{account_name}.blob.core.windows.net",
+            container_name,
+            credential=credential,
+            transport=_build_pooled_transport(size),
+            **_CLIENT_OPTIONS,
+        )
+        # Non-secret attribute for diagnostics/tests.
+        client._backfill_pool_size = size  # type: ignore[attr-defined]
+        _SHARED_CONTAINER_CLIENTS[key] = client
+        return client
+
+
+def reset_shared_blob_clients() -> None:
+    """Drop cached clients (tests / credential rotation)."""
+    global _SHARED_DEFAULT_CREDENTIAL
+    with _SHARED_CLIENT_LOCK:
+        _SHARED_CONTAINER_CLIENTS.clear()
+        _SHARED_DEFAULT_CREDENTIAL = None
+
+
+@dataclass
+class AzureBlobStore:
+    account_name: str
+    container_name: str
+    scan_workers: int | None = None
+    _cached_container: object = field(default=None, init=False, repr=False, compare=False)
+    _cached_arrow_filesystem: object = field(default=None, init=False, repr=False, compare=False)
+
+    def _container(self):
+        if self._cached_container is not None:
+            return self._cached_container
+        # Reuse the process-wide client so every scanner worker (and every scan
+        # request) shares one connection pool sized for BACKFILL_SCAN_WORKERS.
+        client = get_shared_container_client(
+            self.account_name,
+            self.container_name,
+            pool_size=blob_pool_size(self.scan_workers),
+        )
         self._cached_container = client
         return client
 
