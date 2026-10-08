@@ -254,6 +254,52 @@ Each machine in `/api/backfill/status` also carries `lifecycle_source`
 (`databricks`/`mongo`/`null`) and `lifecycle_enriched`, shown as the hover
 title on the machine name in the coverage table.
 
+### 4d. Outerbounds connectivity probe (read-only diagnostics)
+
+`OUTERBOUNDS_PROBE_ENABLED=1` adds **Admin > Outerbounds probe** and two routes:
+`GET /api/diagnostics/outerbounds/status` (flags, hosts, allowlist, credential source, last
+result) and `POST /api/diagnostics/outerbounds` (body: `{"flow": "FSTBackfill"}`; optional
+`include_trigger`, `deployment_id`). Both return **404** when the flag is off, **422** for a
+flow not in `OUTERBOUNDS_PROBE_FLOW_ALLOWLIST` or a `deployment_id` other than
+`OUTERBOUNDS_PROBE_DEPLOYMENT_ID`, and **409** while another probe runs. They are not
+workflow-mutation routes.
+
+Stages run in order, each capped by `OUTERBOUNDS_PROBE_STAGE_TIMEOUT_SECONDS` (default 20,
+clamped 5-30), and return `{id, name, status: pass|fail|skip|expected_fail, detail,
+error_type, ms}`:
+
+1. **network** - DNS + TCP + TLS on :443 to `api.<domain>` and `metadata.<domain>`
+   (`OUTERBOUNDS_DEPLOYMENT_DOMAIN`, default `augury.obp.outerbounds.com`; the bare domain has
+   no DNS record) plus `OUTERBOUNDS_PROBE_EXTRA_HOST` if set.
+2. **packages** - imports `metaflow` (ob-metaflow + ob-metaflow-extensions, pinned in
+   `backend/requirements.txt`) in a child process; versions and which config keys are present
+   (names only).
+3. **auth** - with credentials, fetches the Outerbounds remote config (`x-api-key`), the same
+   first call Metaflow makes; without credentials, an unauthenticated metadata ping where
+   401/403 is reported as `expected_fail`.
+4. **list_runs** - Metaflow client `Flow(<flow>).runs()` (first 3, read-only). Always
+   attempted; the exact exception type and redacted message are kept for the Outerbounds owner.
+5. **trigger** - skipped unless `OUTERBOUNDS_PROBE_TRIGGER_ENABLED=1` **and** the request sets
+   `include_trigger` **and** `OUTERBOUNDS_PROBE_DEPLOYMENT_ID` is configured (and matches).
+   The UI shows no trigger checkbox unless the flag is on.
+
+Credentials: `~/.metaflowconfig` (from `outerbounds configure`, or `METAFLOW_HOME` /
+`METAFLOW_PROFILE`), or env-only `METAFLOW_SERVICE_AUTH_KEY` + `OBP_METAFLOW_CONFIG_URL`.
+The deployed app has **no token** (dev: auth and list_runs show `expected_fail`); binding one
+would be a Databricks secret resource plus `valueFrom` in `app.yaml`. Metaflow work runs in a
+child process so the API process never holds the resolved Outerbounds config. Tokens,
+`Authorization`/`x-api-key` values and the config URL path are never returned or logged.
+
+Each stage logs one `[outerbounds-probe]` line, plus a `probe done:` summary
+(`grep '\[outerbounds-probe\]' /tmp/api.log`). Manual run without the API:
+
+```bash
+cd backend && python -m backfill_dashboard.outerbounds_probe --flow FSTBackfill
+```
+
+`app.yaml` sets the probe ON with trigger OFF. The `prod` target deploys the same `app.yaml`,
+so production gets the probe too unless it is turned off there.
+
 ## 4. Provision FST access and network reachability
 
 This is a required external setup item before expecting a Databricks deployment to complete an

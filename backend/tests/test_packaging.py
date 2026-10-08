@@ -39,6 +39,14 @@ def test_databricks_app_manifest_uses_safe_same_origin_runtime():
     assert "DATABRICKS_TOKEN" not in environment
     # Informational cross-check stays opt-in in the deployed app (fail-open).
     assert environment["FEATURES_CROSSCHECK"]["value"] == "off"
+    # Outerbounds probe: read-only diagnostics ON, trigger stage hard-off, no token in the manifest.
+    assert environment["OUTERBOUNDS_PROBE_ENABLED"]["value"] == "1"
+    assert environment["OUTERBOUNDS_PROBE_TRIGGER_ENABLED"]["value"] == "0"
+    assert environment["OUTERBOUNDS_PROBE_FLOW_ALLOWLIST"]["value"] == "FSTBackfill"
+    assert environment["OUTERBOUNDS_PERIMETER"]["value"] == "default"
+    assert environment["OUTERBOUNDS_DEPLOYMENT_DOMAIN"]["value"] == "augury.obp.outerbounds.com"
+    assert "OUTERBOUNDS_PROBE_DEPLOYMENT_ID" not in environment
+    assert not any(key in environment for key in ("METAFLOW_SERVICE_AUTH_KEY", "OBP_METAFLOW_CONFIG_URL", "METAFLOW_SERVICE_HEADERS"))
     assert environment["DATABRICKS_FEATURE_STORE_TABLE"]["value"] == "dih_prod.silver_mh.feature_store"
     assert environment["DATABRICKS_FEATURE_STORE_BRONZE_TABLE"]["value"] == "dih_prod.bronze_augury_mh_blob.feature_store"
     for key in ("LIFECYCLE_DATABRICKS_TIMEOUT_SECONDS", "LIFECYCLE_DATABRICKS_COLD_TIMEOUT_SECONDS", "BACKFILL_SCAN_WORKERS",

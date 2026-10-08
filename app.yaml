@@ -40,6 +40,19 @@ env:
     value: "0.1"
   - name: FEATURES_CROSSCHECK_TIMEOUT_SECONDS
     value: "300"
+  # Read-only Outerbounds connectivity probe (Admin > Outerbounds probe).
+  # ON for dev per Nitai; prod shares this file. No token is configured, so
+  # auth/list_runs report expected_fail. Trigger stays hard-off.
+  - name: OUTERBOUNDS_PROBE_ENABLED
+    value: "1"
+  - name: OUTERBOUNDS_PROBE_TRIGGER_ENABLED
+    value: "0"
+  - name: OUTERBOUNDS_DEPLOYMENT_DOMAIN
+    value: augury.obp.outerbounds.com
+  - name: OUTERBOUNDS_PERIMETER
+    value: default
+  - name: OUTERBOUNDS_PROBE_FLOW_ALLOWLIST
+    value: FSTBackfill
   - name: MONGODB_URL
     valueFrom: mongodb_url
   - name: FST_PROD_ACCOUNT_NAME

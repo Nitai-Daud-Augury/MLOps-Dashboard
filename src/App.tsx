@@ -2,7 +2,7 @@ import type { ActiveMonth, AdminAction, AdminReadiness, AdminSpec, AdminView, Al
 import { API_BASE, BLOB_SOURCE_STORAGE_KEY, DEFAULT_DEV_NAMESPACE, DEFAULT_OUTERBOUNDS_URL, EMPTY_MACHINES, OUTERBOUNDS_BASE, PROD_ACCOUNT, PROD_CONFIRMATION, PROD_CONTAINER, RECOMMENDED_MACHINE_CONCURRENCY, STATUS_OPTIONS, TEST_ACCOUNT, TEST_CONTAINER } from './constants';
 import { backfillMonthUntil, formatElapsedTime, formatNumber, getCachedJson, orchestratorMonthIndex, orchestratorMonthsThroughToday, utcToday, workflowSocketUrl, writeCachedJson } from './utils';
 import { useToasts } from './hooks';
-import { CopyMachineIdButton, CurrentCostPanel, EmptyState, LoadingMetrics, LoadingWidget, LogViewer, ManifestCreatedDialog, Progress, StatusPill, TestMachineBadge, ToastContainer } from './components';
+import { CopyMachineIdButton, CurrentCostPanel, OuterboundsProbePanel, useOuterboundsProbeStatus, EmptyState, LoadingMetrics, LoadingWidget, LogViewer, ManifestCreatedDialog, Progress, StatusPill, TestMachineBadge, ToastContainer } from './components';
 import { MachineFeatureChart } from './features/machine-feature-chart/MachineFeatureChart';
 import { CampaignWorkspace } from './features/campaigns';
 import {
@@ -1342,6 +1342,8 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
   const [manualMonthIndices, setManualMonthIndices] = useState<number[]>([]);
   const [parallelMachineRuns, setParallelMachineRuns] = useState(false);
   const [adminView, setAdminView] = useState<AdminView>('overview');
+  // Outerbounds connectivity probe: null (hidden) unless OUTERBOUNDS_PROBE_ENABLED=1 on the backend.
+  const outerboundsProbe = useOuterboundsProbeStatus();
   const [adminSidebarOpen, setAdminSidebarOpen] = useState(true);
   const [operatorNote, setOperatorNote] = useState(() => localStorage.getItem('ulrpm-admin-operator-note') ?? '');
   const [fullrlblForm, setFullrlblForm] = useState<FullRlblTestForm>({
@@ -1997,6 +1999,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
           <button className={adminView === 'cost' ? 'active' : ''} type="button" onClick={() => selectAdminView('cost')}><History size={17} /><span>Current cost</span></button>
           <button className={adminView === 'advanced' ? 'active' : ''} type="button" onClick={() => selectAdminView('advanced')}><FlaskConical size={17} /><span>Advanced tools</span></button>
           <button className={adminView === 'observability' ? 'active' : ''} type="button" onClick={() => selectAdminView('observability')}><History size={17} /><span>Logs & history</span></button>
+          {outerboundsProbe ? <button className={adminView === 'diagnostics' ? 'active' : ''} type="button" onClick={() => selectAdminView('diagnostics')}><Activity size={17} /><span>Outerbounds probe</span></button> : null}
         </nav>
       </aside>
       <div className="admin-workspace-content">
@@ -2062,6 +2065,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
       </section>
 
       <CurrentCostPanel />
+      {outerboundsProbe ? <OuterboundsProbePanel status={outerboundsProbe} /> : null}
 
       <section className="run-review-panel admin-view-panel reviews-panel">
         <header className="run-review-header">
