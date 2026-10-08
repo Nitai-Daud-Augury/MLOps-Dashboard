@@ -19,3 +19,9 @@ resources:
             scope: ${var.mongodb_secret_scope}
             key: fst_prod_account_key
             permission: READ
+        # Serverless Starter Warehouse already attached in the mlops-dashboard-dev
+        # UI; keep the Bundle resource so deploys stay consistent.
+        - name: sql-warehouse
+          sql_warehouse:
+            id: "6ed9ddd0b2661edc"
+            permission: CAN_USE

@@ -26,11 +26,24 @@ def test_databricks_app_manifest_uses_safe_same_origin_runtime():
     assert environment["BACKFILL_DISPATCH_ENABLED"]["value"] == "0"
     assert environment["BACKFILL_PRODUCTION_MODE"]["value"] == "0"
     assert environment["ULRPM_MACHINE_IDS_FILE"]["value"] == "data/unique_machine_ids.txt"
+    assert environment["LIFECYCLE_SOURCE"]["value"] == "databricks"
+    assert environment["DATABRICKS_WAREHOUSE_ID"]["valueFrom"] == "sql-warehouse"
+    assert environment["DATABRICKS_MACHINES_RAW_TABLE"]["value"] == "dih_prod.bronze_augury_mh_mongodb.machines_raw"
     assert environment["MONGODB_URL"]["valueFrom"] == "mongodb_url"
     assert environment["FST_PROD_ACCOUNT_NAME"]["value"] == "auguryprodfsthns"
     assert environment["FST_PROD_CONTAINER"]["value"] == "feature-store-container"
     assert environment["FST_PROD_ACCOUNT_KEY"]["valueFrom"] == "fst_account_key"
     assert "value" not in environment["FST_PROD_ACCOUNT_KEY"]
+    # Apps auth is the app service principal; never ship a developer CLI profile.
+    assert "DATABRICKS_PROFILE" not in environment
+    assert "DATABRICKS_TOKEN" not in environment
+    # Informational cross-check stays opt-in in the deployed app (fail-open).
+    assert environment["FEATURES_CROSSCHECK"]["value"] == "off"
+    assert environment["DATABRICKS_FEATURE_STORE_TABLE"]["value"] == "dih_prod.silver_mh.feature_store"
+    assert environment["DATABRICKS_FEATURE_STORE_BRONZE_TABLE"]["value"] == "dih_prod.bronze_augury_mh_blob.feature_store"
+    for key in ("LIFECYCLE_DATABRICKS_TIMEOUT_SECONDS", "LIFECYCLE_DATABRICKS_COLD_TIMEOUT_SECONDS", "BACKFILL_SCAN_WORKERS",
+                "FEATURES_CROSSCHECK_ROW_TOLERANCE", "FEATURES_CROSSCHECK_TIMEOUT_SECONDS"):
+        float(environment[key]["value"])
     assert all(("value" in item) != ("valueFrom" in item) for item in manifest["env"])
     values = [entry.get("value", "") for entry in environment.values()]
     assert not any(re.search(r"https?://|[0-9a-f]{24}", value, re.I) for value in values)
@@ -60,6 +73,10 @@ def test_databricks_bundle_names_sources_targets_and_secret_binding_are_safe():
             "scope": "${var.mongodb_secret_scope}",
             "key": "fst_prod_account_key",
             "permission": "READ",
+        }},
+        {"name": "sql-warehouse", "sql_warehouse": {
+            "id": "6ed9ddd0b2661edc",
+            "permission": "CAN_USE",
         }},
     ]
     assert {"mongodb_secret_scope", "mongodb_secret_key"} <= set(bundle["variables"])
@@ -248,6 +265,9 @@ def test_team_docs_and_plan_are_shareable_and_match_runtime():
     assert "BUNDLE_VAR_mongodb_secret_key" in runbook
     assert "MONGODB_SECRET_SCOPE" in runbook and "MONGODB_SECRET_KEY" in runbook
     assert "Refresh/rotate Mongo auth only when status reports unauthorized/unavailable/expired" in runbook
+    assert "LIFECYCLE_SOURCE" in runbook
+    assert "created_at" in runbook and "installation_date" in runbook
+    assert "machines_raw" in runbook
     assert "snapshot.lifecycle_status" not in runbook
     assert "valueFrom" in (DASHBOARD_ROOT / "app.yaml").read_text(encoding="utf-8")
     assert package["scripts"]["api"].startswith("python -m uvicorn ")

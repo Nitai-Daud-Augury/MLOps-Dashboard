@@ -49,3 +49,6 @@ class MonthStatus:
     columns: list[str] = field(default_factory=list)
     error: str | None = None
     activity_status: ActivityStatus = "unknown"
+    # Informational FEATURES_CROSSCHECK annotation (blob vs feature_store).
+    # Never influences status / activity_status.
+    crosscheck: dict | None = None

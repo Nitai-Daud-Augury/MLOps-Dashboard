@@ -24,6 +24,7 @@ export interface DashboardSnapshot {
   summary: DashboardSummary;
   machines: MachineStatus[];
   warnings: string[];
+  crosscheck?: Record<string, unknown> | null;
 }
 export interface ScanState {
   scan_id: string;

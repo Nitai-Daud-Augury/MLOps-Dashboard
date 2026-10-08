@@ -32,6 +32,8 @@ class Database:
                     connection.execute(
                         f"ALTER TABLE {table} ADD COLUMN is_test_machine INTEGER NOT NULL DEFAULT 0"
                     )
+                if "first_recorded_at" not in columns:
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN first_recorded_at TEXT")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

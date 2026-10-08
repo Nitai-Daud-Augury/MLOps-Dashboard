@@ -47,6 +47,14 @@ from .deps import (
     manifest_writer, repository, running_workflows, scanner, settings, workflow_reviews, control_plane,
 )
 from .runtime_mode import runtime_info
+from .data_sources import describe_data_sources
+from .feature_store_crosscheck import (
+    NOT_JUDGED_NOTE as CROSSCHECK_NOT_JUDGED_NOTE,
+    STALENESS_NOTE as CROSSCHECK_STALENESS_NOTE,
+    describe_crosscheck_config,
+    flagged_rows as crosscheck_flagged_rows,
+    stale_rows as crosscheck_stale_rows,
+)
 from .control_store import ACTIVE_MONTH_STATES
 from .inventory_models import MachineSearchQuery
 from .scanner import BackfillScanner
@@ -208,7 +216,48 @@ def inventory_facets(request: Request, response: Response, cohort: str | None = 
 
 @app.get("/api/backfill/status")
 def backfill_status() -> dict:
-    return repository.latest()
+    payload = dict(repository.latest())
+    # Read-only: which lifecycle source this process loaded and where the
+    # machine list comes from. LIFECYCLE_SOURCE is the only switch.
+    snapshot = payload.get("snapshot") or {}
+    payload["data_sources"] = describe_data_sources(
+        scanner.settings,
+        scanner.lifecycle_inventory,
+        scanner.lifecycle_status,
+        scanner.inventory,
+        last_crosscheck=snapshot.get("crosscheck") if isinstance(snapshot, dict) else None,
+    )
+    return payload
+
+
+@app.get("/api/backfill/crosscheck")
+def backfill_crosscheck() -> dict:
+    """Read-only FEATURES_CROSSCHECK result for the latest scan (informational;
+    blob statuses are never changed by it)."""
+    snapshot = repository.latest().get("snapshot") or {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    summary = snapshot.get("crosscheck")
+    flagged = crosscheck_flagged_rows(snapshot)
+    stale = crosscheck_stale_rows(snapshot)
+    return {
+        "config": describe_crosscheck_config(),
+        "scan_id": snapshot.get("scan_id"),
+        "summary": summary,
+        "counts": {
+            "real_mismatch_months": len(flagged),
+            "stale_months": len(stale),
+            "stale_months_with_differences": sum(1 for row in stale if row.get("suppressed_flags")),
+            "clean_months": (summary or {}).get("clean_months"),
+            "staleness_status": ((summary or {}).get("staleness") or {}).get("status"),
+        },
+        # Real mismatches: Databricks holds the current blob file version.
+        "flagged": flagged,
+        # Databricks copy older than blob (or missing): not judged as a mismatch.
+        "stale": stale,
+        "note": CROSSCHECK_NOT_JUDGED_NOTE,
+        "staleness_note": CROSSCHECK_STALENESS_NOTE,
+    }
 
 
 @app.get("/api/blob-sources/accounts")
@@ -234,7 +283,11 @@ def start_scan(background_tasks: BackgroundTasks, request: ScanRequest | None = 
     scan_instance = BackfillScanner(
         settings=scan_settings,
         inventory=scanner.inventory,
-        blob_store=AzureBlobStore(scan_settings.fst_account, scan_settings.fst_container),
+        blob_store=AzureBlobStore(
+            scan_settings.fst_account,
+            scan_settings.fst_container,
+            scan_workers=scan_settings.scan_workers,
+        ),
         silver_provider=scanner.silver_provider,
         lifecycle_inventory=scanner.lifecycle_inventory,
         lifecycle_status=scanner.lifecycle_status,

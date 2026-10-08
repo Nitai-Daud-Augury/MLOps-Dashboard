@@ -146,28 +146,26 @@ def test_deactivated_full_scan_rolls_up_populated_cutoff_month(monkeypatch: pyte
     assert "1 cutoff" in snapshot.warnings[0]
 
 
-def test_installation_date_overrides_an_impossibly_early_fst_partition(monkeypatch: pytest.MonkeyPatch):
+def test_installation_date_never_hides_an_existing_fst_partition(monkeypatch: pytest.MonkeyPatch):
+    """Intentional change (data-start parity): a partition that exists before the
+    lifecycle installation date is still read; installation only bounds months
+    that have no partition, and is clamped to the first observed data."""
     record = MachineRecord(
         "m1",
         status="active",
         installation_at="2026-08-14T12:00:00Z",
     )
-    snapshot = _full_scan(
-        monkeypatch,
-        Inventory(record=record),
-        BlobStore({
-            "machine_id=m1/quarter=2026Q2/month=6/partition_version=last/part-0.parquet",
-        }),
-    )
+    blob_store = BlobStore({
+        "machine_id=m1/quarter=2026Q2/month=6/partition_version=last/part-0.parquet",
+    })
+    snapshot = _full_scan(monkeypatch, Inventory(record=record), blob_store)
 
     machine = snapshot.machines[0]
-    assert machine.installation_month == "2026-08"
-    assert machine.pre_install_months == 2
-    assert machine.months_expected == 0
-    assert [month.activity_status for month in machine.months] == [
-        "not_installed",
-        "not_installed",
-    ]
+    assert machine.installation_month == "2026-08"  # displayed as reported
+    assert machine.pre_install_months == 0
+    assert machine.months[0].activity_status == "online"
+    assert machine.months[0].status == "backfilled"
+    assert "machine_id=m1/quarter=2026Q2/month=6/partition_version=last/part-0.parquet" in blob_store.reads
 
 
 def test_scan_carries_inventory_identity_to_machine_status(monkeypatch: pytest.MonkeyPatch):
@@ -178,7 +176,7 @@ def test_scan_carries_inventory_identity_to_machine_status(monkeypatch: pytest.M
     assert snapshot.machines[0].is_test_machine
 
 
-def test_scan_reconnects_mongo_after_startup_network_failure(monkeypatch: pytest.MonkeyPatch):
+def test_scan_reconnects_lifecycle_after_startup_network_failure(monkeypatch: pytest.MonkeyPatch):
     import backfill_dashboard.scanner as scanner_module
 
     record = MachineRecord("m1", display_name="ULRPM E2E test #5", is_test_machine=True)
@@ -188,10 +186,48 @@ def test_scan_reconnects_mongo_after_startup_network_failure(monkeypatch: pytest
         attempts.append(True)
         return Inventory(record=record), "healthy"
 
-    monkeypatch.setattr(scanner_module, "build_mongo_provider", connect)
+    monkeypatch.setattr(scanner_module, "build_lifecycle_provider", connect)
     snapshot = _full_scan(monkeypatch, None, BlobStore(), "unreachable")
 
     assert len(attempts) == 1
     assert snapshot.machines[0].display_name == "ULRPM E2E test #5"
     assert snapshot.machines[0].is_test_machine
     assert "status healthy" in snapshot.warnings[0]
+
+def test_lifecycle_hang_still_reports_initial_progress_then_fail_open(monkeypatch: pytest.MonkeyPatch):
+    """UI must leave the empty-loading state even when Databricks enrichment stalls."""
+    import time
+    from backfill_dashboard.config import Settings
+    import backfill_dashboard.scanner as scanner_module
+    from backfill_dashboard.scanner import BackfillScanner
+    from backfill_dashboard.parquet_inspector import ParquetFeatureSummary
+    from types import SimpleNamespace
+
+    class SlowLifecycle:
+        def get_many(self, machine_ids):
+            raise TimeoutError("Databricks lifecycle SQL execute timed out after 0.05s")
+
+    phases: list[str] = []
+    settings = Settings(scan_workers=1)
+    object.__setattr__(settings, "target_features", ["f1"])
+    scanner = BackfillScanner(
+        settings,
+        Inventory(),
+        BlobStore(),
+        SimpleNamespace(row_counts=lambda *_: {}),
+        SlowLifecycle(),
+        "healthy",
+    )
+    monkeypatch.setattr(scanner, "_discover_coverage_starts", lambda *args, **kwargs: {"m1": (2026, 6)})
+    monkeypatch.setattr(scanner, "_coverage_partitions", lambda starts: [MonthPartition(6, 2026, 6), MonthPartition(7, 2026, 7)])
+    monkeypatch.setattr(scanner_module, "load_fst_schema_contract", lambda _: SimpleNamespace(columns=("f1",), schema_version="test"))
+    monkeypatch.setattr(scanner_module, "inspect_feature_partition", lambda content, features: ParquetFeatureSummary(2, ["f1"], {"f1": 2}))
+
+    snapshot = scanner.scan(
+        "scan-timeout",
+        progress_callback=lambda completed, total, phase: phases.append(phase),
+    )
+    assert phases[0] == "enriching lifecycle metadata"
+    assert any("lifecycle lookup failed" in warning.lower() for warning in snapshot.warnings)
+    assert snapshot.machines
+
