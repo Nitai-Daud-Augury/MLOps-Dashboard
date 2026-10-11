@@ -50,9 +50,19 @@ def test_databricks_app_manifest_uses_safe_same_origin_runtime():
     assert environment["OUTERBOUNDS_DEPLOYMENT_DOMAIN"]["value"] == "augury.obp.outerbounds.com"
     assert "OUTERBOUNDS_PROBE_DEPLOYMENT_ID" not in environment
     assert not any(key in environment for key in ("METAFLOW_SERVICE_AUTH_KEY", "OBP_METAFLOW_CONFIG_URL", "METAFLOW_SERVICE_HEADERS"))
-    # The Outerbounds SP is documented but not bound yet (the secret does not exist; deploy would fail),
-    # so admin actions answer 503 until it is. Deployment ids arrive together with the SP.
-    assert not any(key.startswith("OUTERBOUNDS_") and key.endswith("_DEPLOYMENT_ID") for key in environment)
+    # Dev/test deployment ids for GitHub Actions dispatch (prod shares this file; runbook 4f).
+    # FullRlbl stays unset until its deployment name is confirmed.
+    assert environment["OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID"]["value"] == "fstbackfill.test.devfstmon.fstbackfill-mrqqu"
+    assert environment["OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID"]["value"] == "fstbkfill.test.devfstm.ulrpmdeatorflow-hwqbr"
+    assert "OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID" not in environment
+    deployment_ids = {value["value"] for key, value in environment.items()
+                      if key.startswith("OUTERBOUNDS_") and key.endswith("_DEPLOYMENT_ID")}
+    assert all(".test." in name for name in deployment_ids)
+    dispatch = yaml.load((DASHBOARD_ROOT / ".github" / "workflows" / "outerbounds-dispatch.yml").read_text(encoding="utf-8"),
+                         Loader=yaml.BaseLoader)
+    run_step = next(step for step in dispatch["jobs"]["dispatch"]["steps"] if step.get("name") == "Run action")
+    allow_default = run_step["env"]["OB_DISPATCH_DEPLOYMENTS"].split("||", 1)[1].strip(" }'")
+    assert deployment_ids == set(allow_default.split(","))
     assert "OUTERBOUNDS_TERMINATE_AUTHORIZE_TOKEN" not in environment
     # Outerbounds actions dispatch through GitHub Actions; the token comes only from the bound secret.
     assert environment["OUTERBOUNDS_DISPATCH_BACKEND"]["value"] == "github_actions"

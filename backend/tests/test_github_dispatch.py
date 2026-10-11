@@ -681,6 +681,25 @@ def test_script_allowlists_deployments_and_gates_prod_by_repository_variable():
     assert ob_dispatch.validate(prod)["params"]["name-space"] == "feature-store-container"
 
 
+def test_script_accepts_the_configured_app_deployments_with_the_workflow_default_allowlist():
+    manifest = yaml.safe_load((ROOT / "app.yaml").read_text(encoding="utf-8"))
+    env = {item["name"]: item.get("value") for item in manifest["env"]}
+    fst = env["OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID"]
+    orchestrator = env["OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID"]
+    allow = f"{fst},{orchestrator}"
+    assert ob_dispatch.validate(_inputs(OB_DEPLOYMENT_ID=fst, OB_DISPATCH_DEPLOYMENTS=allow))["deployment_ids"] == [fst]
+    orch = ob_dispatch.validate(_inputs(OB_FLOW="UlrpmDevBackfillOrchestratorFlow", OB_DEPLOYMENT_ID=orchestrator,
+                                        OB_PARAMS_JSON="{}", OB_DISPATCH_DEPLOYMENTS=allow))
+    assert orch["deployment_ids"] == [orchestrator]
+    stop = ob_dispatch.validate(_inputs(OB_ACTION="terminate", OB_DEPLOYMENT_ID=allow, OB_PARAMS_JSON="",
+                                        OB_RUN_ID="argo-fstbackfill.test.devfstmon.fstbackfill-mrqqu-x7k2p",
+                                        OB_DISPATCH_DEPLOYMENTS=allow))
+    assert stop["deployment_ids"] == [fst, orchestrator]
+    with pytest.raises(ob_dispatch.InputError, match="not in the OB_DISPATCH_DEPLOYMENTS allowlist"):
+        ob_dispatch.validate(_inputs(OB_DEPLOYMENT_ID="fstbackfill.test.devcoreme.fstbackfill-zvsui",
+                                     OB_DISPATCH_DEPLOYMENTS=allow))
+
+
 def test_script_flow_parameter_allowlist_matches_the_dashboard_builders():
     plan = {MACHINE: [{"month_index": 17, "manifest": "p/a.parquet", "since": "2026/01/01/00", "until": "2026/01/08/00"}]}
     builders = {
