@@ -44,7 +44,7 @@ entry point. Unknown API paths remain JSON 404s.
 |---|---:|---:|---|
 | Local | Yes, with configured FST access | Capability enabled, still subject to readiness/auth checks | Vite + uvicorn are separate processes. |
 | Docker | Yes, with configured FST access | Disabled | Safe monitor-only defaults; state under `/tmp` is ephemeral. |
-| Databricks App | Yes, once external FST credentials/network are configured | Metaflow client, enabled once the Outerbounds service principal is configured (503 with setup steps until then) | Mongo uses a Databricks secret resource; see runbook 4e for the SP. Campaign dispatch is refused. |
+| Databricks App | Yes, once external FST credentials/network are configured | GitHub Actions dispatch (`outerbounds-dispatch.yml`, OIDC machine user), enabled once `GITHUB_DISPATCH_TOKEN` is bound (503 with setup steps until then); the Metaflow-client backend stays selectable | Mongo uses a Databricks secret resource; see runbook 4f. Campaign dispatch is refused. |
 
 Manifest generation is separate from workflow triggering and requires its own storage write
 credential. The current bundle does not configure FST read or manifest-write credentials. Do not
@@ -171,8 +171,9 @@ readiness, then stops it by default. Production deployment and all lifecycle con
 prod uses a protected GitHub Environment. An explicit manual keep-running selection is the only
 workflow path that leaves a successfully verified app running.
 
-Docker is monitor-only. On Databricks, trigger/stop/log/requeue actions use the Metaflow client once
-the Outerbounds service principal is bound (runbook 4e); campaign dispatch, namespace-wide stop and
-`argo-workflows create` stay local-only. See
+Docker is monitor-only. On Databricks, trigger/stop/requeue actions run through the
+`outerbounds-dispatch.yml` GitHub Actions workflow once `GITHUB_DISPATCH_TOKEN` is bound (runbook 4f;
+the Metaflow-client backend of runbook 4e remains selectable); task logs, campaign dispatch,
+namespace-wide stop and `argo-workflows create` stay local-only. See
 [docs/DEPLOYMENT_RUNBOOK.md](docs/DEPLOYMENT_RUNBOOK.md) for one-time GitHub/Databricks setup,
 secret binding, commands, verification, cost controls, rollback, and troubleshooting.

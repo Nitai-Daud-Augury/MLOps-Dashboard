@@ -4,12 +4,14 @@ command:
 env:
   - name: MLOPS_DASHBOARD_RUNTIME
     value: databricks
-  # Admin workflow actions (trigger / stop / logs) use the Metaflow client on
-  # Databricks and are enabled only once the Outerbounds service principal is
-  # bound below; until then every action answers HTTP 503 with setup steps.
+  # Admin workflow actions (trigger / stop) run through GitHub Actions on
+  # Databricks: the app dispatches .github/workflows/outerbounds-dispatch.yml,
+  # which logs in to Outerbounds as the OIDC machine user mlops-dashboard-sp.
+  # Until GITHUB_DISPATCH_TOKEN is bound below every action answers HTTP 503
+  # (github_dispatch_not_configured) with setup steps.
   # BACKFILL_DISPATCH_ENABLED=1 also starts the campaign dispatcher, which on
-  # Databricks refuses submissions (no idempotent workflow name in the Metaflow
-  # trigger API). The prod target deploys this same file.
+  # Databricks refuses submissions (no idempotent Argo workflow name through
+  # GitHub Actions or the Metaflow trigger API). The prod target deploys this same file.
   - name: BACKFILL_DISPATCH_ENABLED
     value: "1"
   # Read into Settings.production_mode but not consumed by any code path today
@@ -61,20 +63,35 @@ env:
     value: default
   - name: OUTERBOUNDS_PROBE_FLOW_ALLOWLIST
     value: FSTBackfill
-  # Outerbounds service principal (SP) for admin actions - NOT bound yet: the
-  # secret does not exist, and an unresolved valueFrom would fail the deploy.
-  # Once it exists, add the two secret resources to resources/mlops_dashboard.app.yml
-  # and uncomment (runbook: "Outerbounds service principal"):
-  # - name: METAFLOW_SERVICE_AUTH_KEY
-  #   valueFrom: outerbounds_sp_auth_key
-  # - name: OBP_METAFLOW_CONFIG_URL
-  #   valueFrom: outerbounds_sp_config_url
+  # Outerbounds actions via GitHub Actions (runbook: "Outerbounds via GitHub Actions").
+  - name: OUTERBOUNDS_DISPATCH_BACKEND
+    value: github_actions
+  - name: GITHUB_DISPATCH_REPO
+    value: Nitai-Daud-Augury/MLOps-Dashboard
+  - name: GITHUB_DISPATCH_REF
+    value: main
+  - name: GITHUB_DISPATCH_WORKFLOW
+    value: outerbounds-dispatch.yml
+  # GITHUB_DISPATCH_TOKEN - NOT bound yet: the secret does not exist, and an
+  # unresolved valueFrom would fail the deploy. After
+  #   databricks secrets put-secret mlops-dashboard github_dispatch_token -p mlops-dev
+  # uncomment the github_dispatch_token resource in resources/mlops_dashboard.app.yml
+  # and these lines. Deployment ids = Argo WorkflowTemplate names (the dev
+  # defaults the local dashboard uses are shown):
+  # - name: GITHUB_DISPATCH_TOKEN
+  #   valueFrom: github_dispatch_token
   # - name: OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID
-  #   value: <argo workflow template of FSTBackfill>
+  #   value: fstbackfill.test.devcoreme.fstbackfill-zvsui
   # - name: OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID
-  #   value: <argo workflow template of UlrpmDevBackfillOrchestratorFlow>
+  #   value: fstbkfill.test.devfstm.ulrpmdeatorflow-hwqbr
   # - name: OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID
-  #   value: <argo workflow template of FullRlblDevFstTestFlow>
+  #   value: fullrsttest.test.testulr.fullrlestflow-zsx6n
+  # Probe: OUTERBOUNDS_PROBE_GHA_DISPATCH=1 lets Admin > Outerbounds probe dispatch
+  # action=list_runs (read-only) on request. Off by default.
+  # Alternative backend (OUTERBOUNDS_DISPATCH_BACKEND=metaflow): an Outerbounds
+  # service-principal key as METAFLOW_SERVICE_AUTH_KEY + OBP_METAFLOW_CONFIG_URL
+  # (runbook: "Outerbounds service principal"). Static machine-user keys were
+  # rejected with 403, so this path is not in use.
   - name: MONGODB_URL
     valueFrom: mongodb_url
   - name: FST_PROD_ACCOUNT_NAME

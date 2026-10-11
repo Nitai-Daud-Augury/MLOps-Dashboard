@@ -143,10 +143,13 @@ idempotency keys, lease-safe dispatch, and one ready window per machine. Use a
 persistent mounted `BACKFILL_CONTROL_PLANE_DB_PATH` in production. Keep
 `BACKFILL_DISPATCH_ENABLED=0` locally until the canary gates in
 `BACKFILL_CAMPAIGNS.md` have been completed. The Databricks app sets it to `1`;
-there the campaign adapter refuses submissions (the Metaflow trigger API cannot
-set the idempotent workflow name), while per-machine admin actions run through
-the Metaflow client once the Outerbounds service principal is configured
-(`outerbounds_actions.py`, docs/DEPLOYMENT_RUNBOOK.md).
+there the campaign adapter refuses submissions (no idempotent Argo workflow
+name), while per-machine admin actions run through GitHub Actions
+(`OUTERBOUNDS_DISPATCH_BACKEND=github_actions`: `outerbounds_gha.py`,
+`github_dispatch.py`, `scripts/ob_dispatch.py`, `.github/workflows/outerbounds-dispatch.yml`)
+once `GITHUB_DISPATCH_TOKEN` is bound, or through the Metaflow client
+(`OUTERBOUNDS_DISPATCH_BACKEND=metaflow`, `outerbounds_actions.py`) with a
+service-principal key. See docs/DEPLOYMENT_RUNBOOK.md 4e/4f.
 
 Estimates show separate allocated-share and node-billing ranges. Scheduler and
 retry factors are explicit assumptions; storage transaction cost stays marked

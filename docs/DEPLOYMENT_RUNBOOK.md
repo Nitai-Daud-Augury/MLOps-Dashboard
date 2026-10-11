@@ -8,12 +8,14 @@ start a shared app until those owners approve the target workspace and costs.
 ## Current deployment contract
 
 - App names are `mlops-dashboard-dev` and `mlops-dashboard` (prod).
-- Admin workflow actions (trigger, stop, logs, cancel/requeue) run locally through the argo/kubectl
-  CLIs and on Databricks Apps through the Metaflow client (`backend/backfill_dashboard/outerbounds_actions.py`),
-  enabled once the Outerbounds service principal is configured (section 4e). Without it the buttons
-  stay enabled and every action answers **HTTP 503** "Outerbounds service principal not configured:
-  set METAFLOW_SERVICE_AUTH_KEY and OBP_METAFLOW_CONFIG_URL ...". Docker has no workflow backend
-  (403). Scanning reads FST; lifecycle enrichment is
+- Admin workflow actions (trigger, stop, cancel/requeue) run locally through the argo/kubectl
+  CLIs. On Databricks Apps they run through **GitHub Actions** (`OUTERBOUNDS_DISPATCH_BACKEND=github_actions`,
+  section 4f): the app dispatches `.github/workflows/outerbounds-dispatch.yml`, which logs in to
+  Outerbounds as the OIDC machine user `mlops-dashboard-sp`. Until `GITHUB_DISPATCH_TOKEN` is bound
+  the buttons stay enabled and every action answers **HTTP 503** `github_dispatch_not_configured`
+  naming both options. The in-app Metaflow client backend (section 4e) remains available with
+  `OUTERBOUNDS_DISPATCH_BACKEND=metaflow` and a service-principal key (static machine-user keys were
+  rejected with 403). Docker has no workflow backend (403). Scanning reads FST; lifecycle enrichment is
   selected by `LIFECYCLE_SOURCE` (`databricks` in the deployed app manifest, `mongo` by default
   locally when unset). Databricks uses bronze `dih_prod.bronze_augury_mh_mongodb.machines_raw`
   (latest `ingestion_timestamp` per `_id`) via the bound SQL warehouse. Lookup remains fail-open.
@@ -396,6 +398,77 @@ App resource with transactions and row locks; best fit for locks) - alternatives
 through the bound SQL warehouse (`BACKFILL_CONTROL_STORE=databricks` already exists for the month
 store; seconds of latency, no row locks) or Azure blob JSON with ETags (what the month store
 uses; simple, coarse-grained). A UC Volume is not suitable for SQLite (no POSIX locking from Apps).
+
+### 4f. Outerbounds via GitHub Actions (admin actions on Databricks, current)
+
+The deployed app cannot hold an Outerbounds credential, so it dispatches Outerbounds actions to
+GitHub Actions in `Nitai-Daud-Augury/MLOps-Dashboard`:
+
+```
+app (outerbounds_gha.py / github_dispatch.py)
+  -> POST /repos/{repo}/actions/workflows/outerbounds-dispatch.yml/dispatches   (ref main)
+  -> find the run by run-name ob-<action>-<request_id>   (event=workflow_dispatch, created>=)
+  -> poll until completed -> download + unzip artifact ob-result-<request_id> (result.json)
+workflow: checkout -> mask parameter values -> setup-python 3.11
+  -> pip install outerbounds[azure]==0.12.39 ob-metaflow==2.19.34.1 ob-metaflow-extensions==1.6.24
+  -> outerbounds service-principal-configure --name mlops-dashboard-sp
+       --deployment-domain augury.obp.outerbounds.com --perimeter default --github-actions
+       (GitHub OIDC JWT, audience https://augury.obp.outerbounds.com, exchanged at
+        auth.augury.obp.outerbounds.com/generate/service-principal; writes $METAFLOW_HOME/config.json)
+  -> python scripts/ob_dispatch.py   (inputs via env only; strict validation; Metaflow client)
+```
+
+| Action | GitHub Actions backend |
+|---|---|
+| Trigger (FSTBackfill / ULRPM orchestrator / FullRlbl test) | `action=trigger`, the same parameters as `argo submit`; the workflow checks the deployment's flow, declared parameters and the orchestrator contract before `DeployedFlow.trigger` |
+| Stop one run | `action=terminate` with the configured deployment ids (`OB_TERMINATE_AUTHORIZE_TOKEN` repository secret if the deployment belongs to another user) |
+| Live status | cached `action=list_runs` snapshots, refreshed in the background at most every `OUTERBOUNDS_GHA_STATUS_TTL_SECONDS` (default 300); never blocks a request |
+| Logs, Create Workflow, namespace-wide stop, campaign dispatch | not supported (logs would be public; campaigns lack Argo-level idempotency) |
+
+**Idempotency.** `request_id = <op>-sha256(pending admin action id | op | payload)[:24]`. The pending
+action id reaches the child as `DASHBOARD_ADMIN_ACTION_ID`; the payload contains machines,
+windows/manifest plan and deployment. Before dispatching, the child looks for a run whose run-name
+is `ob-<action>-<request_id>` (last `GITHUB_DISPATCH_LOOKBACK_HOURS`, default 72) and reuses it.
+All existing guards (cancel window, duplicate submit, month reservations, strictly sequential
+same-machine chunks) run before the child starts, exactly as on the argo path.
+
+**Timeouts.** Run must appear within `GITHUB_DISPATCH_FIND_SECONDS` (120) and finish within
+`GITHUB_DISPATCH_TIMEOUT_SECONDS` (1200); poll every `GITHUB_DISPATCH_POLL_SECONDS` (10).
+Errors: 503 `github_dispatch_not_configured`, 502 `github_http_<code>` / `github_result_missing`,
+504 `github_dispatch_timeout`, 422 `github_dispatch_payload_too_large` (GitHub caps dispatch inputs
+at 65,535 characters; very large sub-month plans must be split).
+
+**Public-repo safety.** The repository is public, so workflow logs and artifacts are world-readable.
+The workflow masks every `params_json` value (machine ids, manifest paths) in the log before the
+dispatch step prints its env block; `result.json` and the step summary contain no parameter values,
+tokens, config values or env dumps (parameter values are replaced by `<param>` in errors). Status
+snapshots therefore carry no machine ids unless repository variable `OB_DISPATCH_INCLUDE_PARAMS=1`
+(set it only once the repository is private). Recommended: make the repository private or move it
+to the augurysys org.
+
+**Repository variables / secrets (optional).** `OB_DISPATCH_DEPLOYMENTS` (comma allowlist of
+deployment ids), `OB_DISPATCH_ALLOW_PROD=1` (allow `feature-store-container`; off by default, so a
+manual Actions-tab dispatch cannot hit production), `OB_DISPATCH_INCLUDE_PARAMS=1`, secret
+`OB_TERMINATE_AUTHORIZE_TOKEN`.
+
+**Setup.**
+
+1. Outerbounds machine user `mlops-dashboard-sp` (type GitHub Actions): trust issuer
+   `https://token.actions.githubusercontent.com`, audience `https://augury.obp.outerbounds.com`, and
+   restrict claims to `repository = Nitai-Daud-Augury/MLOps-Dashboard`, ideally
+   `sub = repo:Nitai-Daud-Augury/MLOps-Dashboard:ref:refs/heads/main` and
+   `job_workflow_ref = Nitai-Daud-Augury/MLOps-Dashboard/.github/workflows/outerbounds-dispatch.yml@refs/heads/main`.
+   Grant it perimeter `default` with permission to list, trigger and terminate the deployments.
+2. Fine-grained PAT (GitHub > Settings > Developer settings > Fine-grained tokens): resource owner
+   Nitai-Daud-Augury, *Only select repositories* = MLOps-Dashboard, permissions **Actions: Read and
+   write**, **Contents: Read-only** (Metadata read is implied), short expiry.
+3. `databricks secrets put-secret mlops-dashboard github_dispatch_token -p mlops-dev` (paste at the
+   prompt; never on the command line).
+4. Uncomment the `github_dispatch_token` resource in `resources/mlops_dashboard.app.yml` and the
+   `GITHUB_DISPATCH_TOKEN` / `OUTERBOUNDS_*_DEPLOYMENT_ID` lines in `app.yaml`; deploy.
+5. Verify: Admin > Outerbounds probe, stage **GitHub Actions dispatch** (read-only token/workflow
+   check). With `OUTERBOUNDS_PROBE_GHA_DISPATCH=1` and *Include GitHub Actions dispatch* it runs
+   `action=list_runs` end to end.
 
 ## 4. Provision FST access and network reachability
 

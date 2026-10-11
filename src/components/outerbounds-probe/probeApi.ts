@@ -51,6 +51,10 @@ export interface OuterboundsProbeStatus {
   python?: { path: string; source: string; ok: boolean; error: string | null };
   metaflow_config?: { dir: string; config_file_present: boolean };
   config_keys?: { present: string[]; absent: string[] };
+  /** Selected Outerbounds dispatch backend: argo_cli (local), github_actions or metaflow. */
+  dispatch_backend?: string | null;
+  /** GitHub Actions dispatch settings (never the token). */
+  github_dispatch?: { token_configured: boolean; repo: string; ref: string; workflow: string; dispatch_enabled: boolean };
   last_result: ProbeResult | null;
 }
 

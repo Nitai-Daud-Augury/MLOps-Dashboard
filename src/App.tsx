@@ -2007,7 +2007,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
         </div>
         <div className={argoReady ? 'readiness-item ready' : 'readiness-item blocked'}>
           <strong>Workflow actions</strong>
-          <span>{adminReadiness ? (argoReady ? (adminReadiness.argo.backend === 'metaflow' ? (adminReadiness.argo.detail ?? 'Outerbounds service principal configured') : 'Argo authorization verified') : adminReadiness.argo.detail) : 'Checking permissions...'}</span>
+          <span>{adminReadiness ? (argoReady ? (adminReadiness.argo.backend === 'metaflow' || adminReadiness.argo.backend === 'github_actions' ? (adminReadiness.argo.detail ?? 'Outerbounds dispatch configured') : 'Argo authorization verified') : adminReadiness.argo.detail) : 'Checking permissions...'}</span>
         </div>
         <div className={fullrlblReady ? 'readiness-item ready' : 'readiness-item blocked'}>
           <strong>FullRlbl test template</strong>

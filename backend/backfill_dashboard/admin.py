@@ -443,6 +443,9 @@ class AdminActionRepository:
                 capture_output=True,
                 text=True,
                 timeout=60 * 60 * 6,
+                # The pending action id is the idempotency salt of the GitHub Actions
+                # dispatch child (github_dispatch.request_id_for); harmless for argo/kubectl.
+                env={**os.environ, "DASHBOARD_ADMIN_ACTION_ID": action.id},
             )
             with self._lock:
                 action.stdout = result.stdout or ""

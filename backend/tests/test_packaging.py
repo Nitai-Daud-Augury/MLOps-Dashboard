@@ -52,6 +52,17 @@ def test_databricks_app_manifest_uses_safe_same_origin_runtime():
     # so admin actions answer 503 until it is. Deployment ids arrive together with the SP.
     assert not any(key.startswith("OUTERBOUNDS_") and key.endswith("_DEPLOYMENT_ID") for key in environment)
     assert "OUTERBOUNDS_TERMINATE_AUTHORIZE_TOKEN" not in environment
+    # Outerbounds actions dispatch through GitHub Actions; the token binding stays commented out
+    # until the Databricks secret exists (an unresolved valueFrom fails the deploy).
+    assert environment["OUTERBOUNDS_DISPATCH_BACKEND"]["value"] == "github_actions"
+    assert environment["GITHUB_DISPATCH_REPO"]["value"] == "Nitai-Daud-Augury/MLOps-Dashboard"
+    assert environment["GITHUB_DISPATCH_REF"]["value"] == "main"
+    assert environment["GITHUB_DISPATCH_WORKFLOW"]["value"] == "outerbounds-dispatch.yml"
+    assert "GITHUB_DISPATCH_TOKEN" not in environment
+    assert "OUTERBOUNDS_PROBE_GHA_DISPATCH" not in environment
+    raw_manifest = (DASHBOARD_ROOT / "app.yaml").read_text(encoding="utf-8")
+    assert "# - name: GITHUB_DISPATCH_TOKEN\n  #   valueFrom: github_dispatch_token" in raw_manifest
+    assert (DASHBOARD_ROOT / ".github" / "workflows" / environment["GITHUB_DISPATCH_WORKFLOW"]["value"]).is_file()
     assert environment["DATABRICKS_FEATURE_STORE_TABLE"]["value"] == "dih_prod.silver_mh.feature_store"
     assert environment["DATABRICKS_FEATURE_STORE_BRONZE_TABLE"]["value"] == "dih_prod.bronze_augury_mh_blob.feature_store"
     for key in ("LIFECYCLE_DATABRICKS_TIMEOUT_SECONDS", "LIFECYCLE_DATABRICKS_COLD_TIMEOUT_SECONDS", "BACKFILL_SCAN_WORKERS",
@@ -94,7 +105,9 @@ def test_databricks_bundle_names_sources_targets_and_secret_binding_are_safe():
     ]
     assert {"mongodb_secret_scope", "mongodb_secret_key"} <= set(bundle["variables"])
     # No Outerbounds SP secret binding until the secret exists (runbook 4e has the snippet).
-    assert not any(word in item["name"] for item in app["resources"] for word in ("outerbounds", "metaflow"))
+    assert not any(word in item["name"] for item in app["resources"] for word in ("outerbounds", "metaflow", "github"))
+    resource_text = (DASHBOARD_ROOT / "resources" / "mlops_dashboard.app.yml").read_text(encoding="utf-8")
+    assert "# - name: github_dispatch_token" in resource_text and "#     key: github_dispatch_token" in resource_text
     serialized = (DASHBOARD_ROOT / "databricks.yml").read_text(encoding="utf-8") + (DASHBOARD_ROOT / "resources" / "mlops_dashboard.app.yml").read_text(encoding="utf-8")
     assert not re.search(r"https?://|/Users/(?!\$\{workspace\.current_user\.userName\})[^\s/]+/|[0-9a-f]{24}|password\s*:\s*\S+|token\s*:\s*\S+", serialized, re.I)
 
@@ -194,7 +207,10 @@ def test_github_workflows_are_pr_safe_oauth_m2m_poc_and_cost_conservative():
 
     all_workflows = "\n".join(path.read_text(encoding="utf-8") for path in workflow_root.glob("*.yml"))
     # The POC references the Environment secret name only. No secret values belong in the repo.
-    assert set(re.findall(r"secrets\.[A-Za-z0-9_]+", all_workflows)) == {"secrets.DATABRICKS_CLIENT_SECRET"}
+    # outerbounds-dispatch.yml references only the optional terminate production token (Outerbounds
+    # auth itself is OIDC, no secret).
+    assert set(re.findall(r"secrets\.[A-Za-z0-9_]+", all_workflows)) == {
+        "secrets.DATABRICKS_CLIENT_SECRET", "secrets.OB_TERMINATE_AUTHORIZE_TOKEN"}
     assert "DATABRICKS_TOKEN" not in all_workflows
     assert "BUNDLE_VAR_mongodb_secret_scope" in all_workflows
     assert "BUNDLE_VAR_mongodb_secret_key" in all_workflows

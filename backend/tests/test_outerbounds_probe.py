@@ -125,7 +125,7 @@ def test_api_run_returns_stage_table(monkeypatch):
     monkeypatch.setattr(probe, "_http_get", _http(403, "<html>403 Forbidden</html>"))
     response = _request(app_module.app, "POST", "/api/diagnostics/outerbounds", {})
     assert response.status_code == 200
-    assert [stage["id"] for stage in response.body["stages"]] == ["network", "packages", "auth", "list_runs", "trigger"]
+    assert [stage["id"] for stage in response.body["stages"]] == ["network", "packages", "auth", "list_runs", "github_dispatch", "trigger"]
     for stage in response.body["stages"]:
         assert set(stage) == STAGE_KEYS
     assert response.body["overall"] == "expected_fail"
@@ -269,7 +269,7 @@ def test_one_log_line_per_stage_plus_summary(monkeypatch, caplog):
     probe.run_probe()
     lines = [record.getMessage() for record in caplog.records if record.name == probe.LOGGER_NAME]
     assert all(line.startswith("[outerbounds-probe] ") for line in lines)
-    assert sum(" stage " in line for line in lines) == 5
+    assert sum(" stage " in line for line in lines) == 6
     assert lines[-1].startswith("[outerbounds-probe] probe done: ") and "overall=expected_fail" in lines[-1]
     assert probe.LOGGER_NAME.startswith("uvicorn.error.")
 

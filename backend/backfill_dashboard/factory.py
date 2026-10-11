@@ -100,6 +100,18 @@ def build_components():
         command_builder = MetaflowCommandBuilder()
         running_workflows = MetaflowRunningWorkflowProvider()
         campaign_adapter = MetaflowCampaignAdapter()
+    elif runtime.workflow_backend == "github_actions":
+        # Databricks Apps without an Outerbounds key: dispatch the outerbounds-dispatch.yml
+        # GitHub Actions workflow (OIDC machine user) instead.
+        from .outerbounds_gha import (
+            GithubActionsCampaignAdapter,
+            GithubActionsCommandBuilder,
+            GithubActionsRunningWorkflowProvider,
+        )
+
+        command_builder = GithubActionsCommandBuilder()
+        running_workflows = GithubActionsRunningWorkflowProvider()
+        campaign_adapter = GithubActionsCampaignAdapter()
     else:
         command_builder = WorkflowCommandBuilder()
         running_workflows = RunningWorkflowProvider()

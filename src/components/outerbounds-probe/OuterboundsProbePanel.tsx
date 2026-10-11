@@ -76,6 +76,8 @@ export function ProbeResultView({ result }: { result: ProbeResult }) {
 export function OuterboundsProbePanel({ status }: { status: OuterboundsProbeStatus }) {
   const [flow, setFlow] = useState(status.flow_allowlist[0] ?? '');
   const [includeTrigger, setIncludeTrigger] = useState(false);
+  const [includeGhaDispatch, setIncludeGhaDispatch] = useState(false);
+  const gha = status.github_dispatch;
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ProbeResult | null>(status.last_result);
@@ -86,6 +88,7 @@ export function OuterboundsProbePanel({ status }: { status: OuterboundsProbeStat
     try {
       const body: Record<string, unknown> = { flow };
       if (status.trigger_enabled && includeTrigger) body.include_trigger = true;
+      if (gha?.dispatch_enabled && includeGhaDispatch) body.include_gha_dispatch = true;
       const response = await fetch(PROBE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       if (!response.ok) throw new Error(await readError(response));
       setResult(await response.json() as ProbeResult);
@@ -94,7 +97,7 @@ export function OuterboundsProbePanel({ status }: { status: OuterboundsProbeStat
     } finally {
       setRunning(false);
     }
-  }, [flow, includeTrigger, status.trigger_enabled]);
+  }, [flow, includeTrigger, includeGhaDispatch, gha?.dispatch_enabled, status.trigger_enabled]);
 
   return <section className="outerbounds-probe-panel admin-view-panel diagnostics-panel">
     <header className="panel-header probe-header">
@@ -103,6 +106,7 @@ export function OuterboundsProbePanel({ status }: { status: OuterboundsProbeStat
         <h2>Outerbounds connectivity probe</h2>
         <p>Read-only checks against <span className="mono">{status.domain}</span> (perimeter {status.perimeter}): network, Metaflow import, auth and run listing. Credentials: {status.credentials_source}.</p>
         {status.python?.ok ? <p className="probe-meta">Child Python: <span className="mono">{status.python.path}</span> ({status.python.source})</p> : null}
+        {gha ? <p className="probe-meta" data-testid="probe-gha-meta">Dispatch backend: <span className="mono">{status.dispatch_backend ?? 'none'}</span>. GitHub Actions: <span className="mono">{gha.workflow}@{gha.ref}</span> in <span className="mono">{gha.repo}</span>, token {gha.token_configured ? 'configured' : 'not configured'}.</p> : null}
       </div>
       <div className="actions probe-actions">
         <label className="probe-flow">Flow
@@ -110,6 +114,7 @@ export function OuterboundsProbePanel({ status }: { status: OuterboundsProbeStat
             {status.flow_allowlist.map((name) => <option key={name} value={name}>{name}</option>)}
           </select>
         </label>
+        {gha?.dispatch_enabled ? <label className="probe-trigger" title="Dispatches the outerbounds-dispatch workflow with action=list_runs (read-only on Outerbounds). Takes a few minutes."><input type="checkbox" checked={includeGhaDispatch} onChange={(event) => setIncludeGhaDispatch(event.target.checked)} disabled={running} />Include GitHub Actions dispatch (list_runs, takes minutes)</label> : null}
         {status.trigger_enabled ? <label className="probe-trigger"><input type="checkbox" checked={includeTrigger} onChange={(event) => setIncludeTrigger(event.target.checked)} disabled={running} />Include trigger stage</label> : null}
         <button className="primary-button" type="button" onClick={() => void run()} disabled={running || !flow}>
           {running ? <Loader2 className="spin" size={16} /> : <Activity size={16} />}{running ? 'Running probe…' : 'Run probe'}

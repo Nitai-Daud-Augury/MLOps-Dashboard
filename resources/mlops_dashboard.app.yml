@@ -25,3 +25,12 @@ resources:
           sql_warehouse:
             id: "6ed9ddd0b2661edc"
             permission: CAN_USE
+        # GitHub Actions dispatch token for Outerbounds actions (fine-grained PAT,
+        # Actions read/write + Contents read on Nitai-Daud-Augury/MLOps-Dashboard).
+        # Uncomment after `databricks secrets put-secret mlops-dashboard github_dispatch_token`
+        # together with GITHUB_DISPATCH_TOKEN in app.yaml (an unresolved secret fails the deploy).
+        # - name: github_dispatch_token
+        #   secret:
+        #     scope: ${var.mongodb_secret_scope}
+        #     key: github_dispatch_token
+        #     permission: READ
