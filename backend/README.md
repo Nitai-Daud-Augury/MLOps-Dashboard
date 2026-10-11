@@ -25,6 +25,12 @@ VITE_BACKFILL_API_BASE_URL=http://host:port npm run dev
 - `FST_PROD_ACCOUNT_KEY` or `FST_PROD_SAS_TOKEN`, optional; otherwise Azure default credentials are used
 - `ULRPM_MACHINE_IDS_FILE`, defaults to the generated ULRPM machine list in `MLOps research`
 - `AUGURY_MACHINE_URL_TEMPLATE`, default `https://app.augury.com/#/machine_health/machines/{machine_id}`
+- `FEATURES_SOURCE`, `blob` (default) or `databricks`: default source for scans; the UI switch
+  (`GET`/`PUT /api/settings/features-source`, 409 while a scan runs) is persisted as the
+  `features_source` setting in the backfill control store. Databricks mode reads month coverage,
+  row counts and target non-null/v1-without-v2 counts from `DATABRICKS_FEATURE_STORE_TABLE`
+  (`feature_store_source.py`); schema completeness is not available there and the cross-check is
+  disabled. `FEATURES_SOURCE_TIMEOUT_SECONDS` (default 300) caps that query.
 - `DATABRICKS_SILVER_ENABLED=1`, optional silver consistency scan
 - `ULRPM_NO_DATA_BEFORE_YEAR` / `ULRPM_NO_DATA_BEFORE_MONTH`, defaults to `2025/05`; missing
   partitions before this cutoff are classified as expected no-source-data candidates

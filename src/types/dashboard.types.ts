@@ -1,3 +1,4 @@
+import type { FeaturesSource, FeaturesSourceStatus } from "../components/features-source/featuresSourceApi";
 import type { MachineStatus } from "./machine.types";
 
 export interface DashboardSummary {
@@ -25,6 +26,9 @@ export interface DashboardSnapshot {
   machines: MachineStatus[];
   warnings: string[];
   crosscheck?: Record<string, unknown> | null;
+  /** Source these results were read from, and when (FEATURES_SOURCE). */
+  features_source?: FeaturesSource | null;
+  features_source_detail?: Record<string, unknown> | null;
 }
 export interface ScanState {
   scan_id: string;
@@ -45,5 +49,6 @@ export interface ScanState {
 export interface StatusPayload {
   scan_state: ScanState;
   snapshot: DashboardSnapshot;
+  data_sources?: { features_source?: FeaturesSourceStatus; [key: string]: unknown };
 }
 export type Tab = "monitor" | "admin" | "sandbox";

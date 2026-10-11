@@ -49,6 +49,8 @@ from .deps import (
 from .runtime_mode import runtime_info
 from .outerbounds_actions import WorkflowBackendError
 from .data_sources import describe_data_sources
+from .features_source import FeaturesSourceSetting, normalize_source, results_status
+import threading
 from .feature_store_crosscheck import (
     NOT_JUDGED_NOTE as CROSSCHECK_NOT_JUDGED_NOTE,
     STALENESS_NOTE as CROSSCHECK_STALENESS_NOTE,
@@ -272,6 +274,70 @@ def inventory_facets(request: Request, response: Response, cohort: str | None = 
     return etag_response(request, response, asdict(facets))
 
 
+# FEATURES_SOURCE runtime switch, persisted in the backfill control store (env
+# FEATURES_SOURCE is the default). Not a workflow-mutation route: it only picks
+# the reader for the next scan and never touches backfills or admin actions.
+features_source_setting = FeaturesSourceSetting(
+    control_store, fallback_path=settings.state_path.with_name("ulrpm_backfill_features_source.json")
+)
+def _log_features_source_startup() -> None:
+    from . import data_source_log as ds_log
+
+    info = features_source_setting.describe(load=False)
+    ds_log.info(
+        f"features source: default={info['default']} (FEATURES_SOURCE"
+        + (f"; {info['config_error']}" if info.get("config_error") else "")
+        + f"), persisted setting at {info['persistence']['location']} (loaded in the background on first use)"
+    )
+
+
+_log_features_source_startup()
+# Serializes "check no scan is running + switch" against "read source + start scan".
+_features_source_lock = threading.Lock()
+
+
+class FeaturesSourceRequest(BaseModel):
+    source: str
+
+
+def _features_source_status(payload: dict | None = None) -> dict:
+    payload = payload if payload is not None else repository.latest()
+    snapshot = payload.get("snapshot") or {}
+    running = bool((payload.get("scan_state") or {}).get("running"))
+    return results_status(features_source_setting.describe(), snapshot if isinstance(snapshot, dict) else {}, running)
+
+
+def _request_actor(request: Request) -> str:
+    for header in ("x-forwarded-email", "x-forwarded-preferred-username", "x-forwarded-user"):
+        value = (request.headers.get(header) or "").strip()
+        if value:
+            return value
+    return f"anonymous@{request.client.host if request.client else 'unknown'}"
+
+
+@app.get("/api/settings/features-source")
+def get_features_source() -> dict:
+    return _features_source_status()
+
+
+@app.put("/api/settings/features-source")
+def put_features_source(body: FeaturesSourceRequest, request: Request) -> dict:
+    source = normalize_source(body.source)
+    if source is None:
+        raise HTTPException(status_code=422, detail="source must be 'blob' or 'databricks'")
+    with _features_source_lock:
+        if repository.scan_state.running:
+            raise HTTPException(
+                status_code=409,
+                detail="A scan is running; wait for it to finish (or reset it) before switching the features source. "
+                       "Running backfills and admin actions are not affected by the switch.",
+            )
+        current = features_source_setting.current()
+        if source != current:
+            features_source_setting.switch(source, actor=_request_actor(request))
+    return _features_source_status()
+
+
 @app.get("/api/backfill/status")
 def backfill_status() -> dict:
     payload = dict(repository.latest())
@@ -284,6 +350,7 @@ def backfill_status() -> dict:
         scanner.lifecycle_status,
         scanner.inventory,
         last_crosscheck=snapshot.get("crosscheck") if isinstance(snapshot, dict) else None,
+        features_source=_features_source_status(payload),
     )
     return payload
 
@@ -338,6 +405,19 @@ def start_scan(background_tasks: BackgroundTasks, request: ScanRequest | None = 
         fst_account=request.source_account if request and request.source_account else scanner.settings.fst_account,
         fst_container=request.source_container if request and request.source_container else scanner.settings.fst_container,
     )
+    with _features_source_lock:
+        state, is_new, scan_instance = _start_scan_locked(scan_settings)
+    if not is_new:
+        return {"scan_state": asdict(repository.scan_state), "already_running": True}
+    if sync:
+        repository.run_scan(scan_instance, state.scan_id)
+    else:
+        background_tasks.add_task(repository.run_scan, scan_instance, state.scan_id)
+    return {"scan_state": asdict(repository.scan_state)}
+
+
+def _start_scan_locked(scan_settings):
+    features_source = features_source_setting.current()
     scan_instance = BackfillScanner(
         settings=scan_settings,
         inventory=scanner.inventory,
@@ -349,18 +429,20 @@ def start_scan(background_tasks: BackgroundTasks, request: ScanRequest | None = 
         silver_provider=scanner.silver_provider,
         lifecycle_inventory=scanner.lifecycle_inventory,
         lifecycle_status=scanner.lifecycle_status,
+        features_source=features_source,
+        feature_store_source=scanner.feature_store_source,
     )
     state, is_new = repository.start_scan(
         source_account=scan_settings.fst_account,
         source_container=scan_settings.fst_container,
+        features_source=features_source,
     )
-    if not is_new:
-        return {"scan_state": asdict(repository.scan_state), "already_running": True}
-    if sync:
-        repository.run_scan(scan_instance, state.scan_id)
-    else:
-        background_tasks.add_task(repository.run_scan, scan_instance, state.scan_id)
-    return {"scan_state": asdict(repository.scan_state)}
+    if is_new:
+        from . import data_source_log as ds_log
+
+        ds_log.info(f"scan requested: scan_id={state.scan_id} features_source={features_source} "
+                    f"(setting origin {features_source_setting.describe().get('origin')})")
+    return state, is_new, scan_instance
 
 
 @app.post("/api/backfill/scan/reset")

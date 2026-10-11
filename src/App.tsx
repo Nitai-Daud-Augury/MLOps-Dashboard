@@ -1,8 +1,9 @@
 import type { ActiveMonth, AdminAction, AdminReadiness, AdminReadinessCheck, AdminSpec, AdminView, AllMachinesBackfillForm, BackfillScope, BackfillStatus, BusyMachineInfo, DashboardSnapshot, DashboardSummary, EnvironmentTarget, FullRlblTestForm, LogsForm, MachineManifestForm, MachineStatus, MachineView, ManifestResult, MonthStatus, MultiMachineManifestForm, RunningWorkflow, RunningWorkflowsPayload, RuntimeInfo, SandboxEvent, SourceType, StatusPayload, StopForm, Tab, Toast, TriggerForm, WorkflowSourceForm, WorkflowSummaryPayload } from './types';
 import { API_BASE, BLOB_SOURCE_STORAGE_KEY, DEFAULT_DEV_NAMESPACE, DEFAULT_OUTERBOUNDS_URL, EMPTY_MACHINES, OUTERBOUNDS_BASE, PROD_ACCOUNT, PROD_CONFIRMATION, PROD_CONTAINER, RECOMMENDED_MACHINE_CONCURRENCY, STATUS_OPTIONS, TEST_ACCOUNT, TEST_CONTAINER } from './constants';
 import { backfillMonthUntil, formatElapsedTime, formatNumber, getCachedJson, orchestratorMonthIndex, orchestratorMonthsThroughToday, utcToday, workflowSocketUrl, writeCachedJson } from './utils';
-import { useToasts } from './hooks';
+import { useToasts, useTopbarHeightVar } from './hooks';
 import { CopyMachineIdButton, CurrentCostPanel, OuterboundsProbePanel, useOuterboundsProbeStatus, EmptyState, LoadingMetrics, LoadingWidget, LogViewer, ManifestCreatedDialog, Progress, StatusPill, TestMachineBadge, ToastContainer } from './components';
+import { FeaturesSourceBanner, FeaturesSourceSwitch } from './components/features-source';
 import { MachineFeatureChart } from './features/machine-feature-chart/MachineFeatureChart';
 import { CampaignWorkspace } from './features/campaigns';
 import {
@@ -71,6 +72,20 @@ const MACHINE_CSV_COLUMNS = [
   'Rows', 'Augury', 'Quick',
 ];
 
+function isNetworkError(message: string): boolean {
+  return /failed to fetch|networkerror|load failed/i.test(message);
+}
+
+async function responseDetail(response: Response): Promise<string> {
+  try {
+    const body = await response.json() as { detail?: unknown };
+    if (typeof body.detail === 'string') return body.detail;
+    return JSON.stringify(body.detail ?? body);
+  } catch {
+    return response.statusText || 'no details';
+  }
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('monitor');
   const [tabDirection, setTabDirection] = useState<'left' | 'right'>('right');
@@ -84,6 +99,8 @@ function App() {
   const [apiError, setApiError] = useState<string | null>(null);
   const [statusRefreshing, setStatusRefreshing] = useState(false);
   const { toasts, add: addToast, dismiss: dismissToast } = useToasts();
+  const detailParams = new URLSearchParams(window.location.search);
+  useTopbarHeightVar([activeTab, detailParams.get('machine'), detailParams.get('quick')]);
   const handleTabChange = (tab: Tab) => {
     const tabOrder: Tab[] = ['monitor', 'admin', 'sandbox'];
     setTabDirection(tabOrder.indexOf(tab) > tabOrder.indexOf(activeTab) ? 'right' : 'left');
@@ -143,7 +160,8 @@ function App() {
 
   const startScan = async () => {
     try {
-      addToast('info', 'Starting blob scan...');
+      const scanSource = payload?.data_sources?.features_source?.active_source === 'databricks' ? 'Databricks' : 'blob';
+      addToast('info', `Starting ${scanSource} scan...`);
       const response = await fetch(`${API_BASE}/api/backfill/scan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -153,7 +171,7 @@ function App() {
         }),
       });
       if (!response.ok) {
-        throw new Error(`Scan request failed: ${response.status}`);
+        throw new Error(`Scan request failed (${response.status}): ${await responseDetail(response)}`);
       }
       const data = await response.json();
       if (data.already_running) {
@@ -166,7 +184,7 @@ function App() {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       setApiError(msg);
-      addToast('error', `Scan failed: ${msg}`);
+      addToast('error', `Scan failed: ${msg.length > 160 ? `${msg.slice(0, 157)}… (full error in the banner)` : msg}`);
     }
   };
 
@@ -252,6 +270,12 @@ function App() {
             <span>Sandbox</span>
           </button>
           </div>
+          <FeaturesSourceSwitch
+            status={payload?.data_sources?.features_source}
+            onSwitched={() => loadStatus(true)}
+            onRescan={startScan}
+            onToast={addToast}
+          />
           <button
           className="icon-button theme-toggle"
           type="button"
@@ -263,12 +287,17 @@ function App() {
         </div>
       </header>
 
-      {apiError ? (
-        <section className="notice error animate-shake">
-          <ShieldAlert size={18} />
-          <span>{apiError}. Start the backend at {API_BASE}.</span>
-        </section>
-      ) : null}
+      {/* Page-level banners: normal flow below the sticky header, stacked, never clipped. */}
+      <div className="page-banners">
+        {apiError ? (
+          <section className="notice error animate-shake" role="alert">
+            <ShieldAlert size={18} />
+            <span>{apiError}{isNetworkError(apiError) ? `. Start the backend at ${API_BASE || window.location.origin}.` : ''}</span>
+            <button className="notice-dismiss" type="button" onClick={() => setApiError(null)} aria-label="Dismiss error" title="Dismiss"><X size={16} /></button>
+          </section>
+        ) : null}
+        <FeaturesSourceBanner status={payload?.data_sources?.features_source} onRescan={startScan} />
+      </div>
 
       <div className={`tab-content from-${tabDirection}`}>
         <p className="subtitle">Monitor coverage and operate FST backfill workflows from one place.</p>
@@ -1992,13 +2021,14 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
         </nav>
       </aside>
       <div className="admin-workspace-content">
-      <div className="admin-view-panel campaigns-panel"><CampaignWorkspace /></div>
       {adminError ? (
-        <section className="notice error">
+        <section className="notice error admin-error-banner" role="alert">
           <ShieldAlert size={18} />
           <span>{adminError}</span>
+          <button className="notice-dismiss" type="button" onClick={() => setAdminError(null)} aria-label="Dismiss error" title="Dismiss"><X size={16} /></button>
         </section>
       ) : null}
+      <div className="admin-view-panel campaigns-panel"><CampaignWorkspace /></div>
 
       <section className="admin-readiness admin-view-panel overview-panel" aria-live="polite">
         <div className={manifestStorageReady ? 'readiness-item ready' : 'readiness-item blocked'}>

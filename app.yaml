@@ -37,6 +37,12 @@ env:
   # the worker count when unset).
   - name: BACKFILL_SCAN_WORKERS
     value: "12"
+  # Default features source for scans: "blob" (FST Parquet in Azure Blob) or
+  # "databricks" (aggregates from DATABRICKS_FEATURE_STORE_TABLE). Users can
+  # switch it in the dashboard header; the choice is stored in the backfill
+  # control store and needs a rescan. Prod shares this file.
+  - name: FEATURES_SOURCE
+    value: blob
   # Informational blob-vs-Databricks feature_store cross-check. Off in the app
   # until the app service principal has SELECT on both tables below; set to
   # "feature_store" to enable (fail-open: never changes scan statuses).
