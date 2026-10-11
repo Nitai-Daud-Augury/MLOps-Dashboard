@@ -8,8 +8,22 @@ export interface ProbeStage {
   name: string;
   status: ProbeStageStatus;
   detail: string;
+  /** Exception type, `HTTP<code>`, or a probe code such as `interpreter_missing`. */
   error_type: string | null;
   ms: number;
+  /** What the stage checks (from the backend). */
+  description?: string;
+  /** HTTP status seen by the stage (auth), when there is one. */
+  http_status?: number | null;
+  /** What the result means and the next step (from the backend). */
+  hint?: string | null;
+}
+
+export interface ProbeCounts {
+  pass: number;
+  fail: number;
+  expected_fail: number;
+  skip: number;
 }
 
 export interface ProbeResult {
@@ -19,6 +33,7 @@ export interface ProbeResult {
   ms: number;
   overall: Exclude<ProbeStageStatus, 'skip'>;
   flow: string;
+  counts?: ProbeCounts;
   stages: ProbeStage[];
 }
 
@@ -35,6 +50,7 @@ export interface OuterboundsProbeStatus {
   /** Interpreter used for the Metaflow child process (absolute path; error set when unusable). */
   python?: { path: string; source: string; ok: boolean; error: string | null };
   metaflow_config?: { dir: string; config_file_present: boolean };
+  config_keys?: { present: string[]; absent: string[] };
   last_result: ProbeResult | null;
 }
 

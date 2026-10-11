@@ -91,9 +91,18 @@ def build_components():
     repository = ReportRepository(settings)
     admin_repository = AdminActionRepository(settings.state_path.with_name("ulrpm_backfill_admin_actions.json"))
     workflow_reviews = WorkflowReviewRepository(settings.state_path.with_name("ulrpm_backfill_workflow_reviews.json"))
-    command_builder = WorkflowCommandBuilder()
     manifest_writer = BackfillManifestWriter()
-    running_workflows = RunningWorkflowProvider()
+    campaign_adapter = None
+    if runtime.workflow_backend == "metaflow":
+        # Databricks Apps: no argo/kubectl; the Metaflow client (child process) instead.
+        from .outerbounds_actions import MetaflowCampaignAdapter, MetaflowCommandBuilder, MetaflowRunningWorkflowProvider
+
+        command_builder = MetaflowCommandBuilder()
+        running_workflows = MetaflowRunningWorkflowProvider()
+        campaign_adapter = MetaflowCampaignAdapter()
+    else:
+        command_builder = WorkflowCommandBuilder()
+        running_workflows = RunningWorkflowProvider()
     blob_discovery = AzureBlobDiscovery(settings.fst_account, settings.fst_container)
     control_store = build_control_store(
         state_path=settings.state_path.with_name("ulrpm_backfill_control.json")
@@ -104,5 +113,6 @@ def build_components():
         inventory_status,
         manifest_writer,
         workflow_mutations_enabled=runtime.workflow_mutations,
+        workflow_adapter=campaign_adapter,
     )
     return settings, scanner, repository, admin_repository, workflow_reviews, command_builder, manifest_writer, running_workflows, blob_discovery, control_store, control_plane

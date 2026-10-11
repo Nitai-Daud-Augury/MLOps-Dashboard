@@ -19,7 +19,7 @@ from .workflow_adapter import ArgoWorkflowAdapter
 
 class ControlPlane:
     def __init__(self, settings, source_inventory, source_status: str, manifest_writer,
-                 workflow_mutations_enabled: bool = True) -> None:
+                 workflow_mutations_enabled: bool = True, workflow_adapter=None) -> None:
         self.settings = settings
         self.database = Database(settings.control_plane_db_path)
         self.inventory = InventoryRepository(self.database)
@@ -34,7 +34,12 @@ class ControlPlane:
         self.campaign_service = CampaignService(
             self.inventory, self.campaigns, self.capacity, self.signer, self.readiness
         )
-        dispatcher = Dispatcher(self.campaigns, self.inventory, self.capacity, ArgoWorkflowAdapter(manifest_writer), self.pricing) if settings.dispatch_enabled and workflow_mutations_enabled else None
+        # BACKFILL_DISPATCH_ENABLED=1 starts the campaign dispatcher wherever
+        # workflow mutations are available (local, or Databricks with the
+        # Outerbounds SP). The adapter is runtime-specific: argo CLI locally,
+        # the (refusing) Metaflow adapter on Databricks.
+        adapter = workflow_adapter if workflow_adapter is not None else ArgoWorkflowAdapter(manifest_writer)
+        dispatcher = Dispatcher(self.campaigns, self.inventory, self.capacity, adapter, self.pricing) if settings.dispatch_enabled and workflow_mutations_enabled else None
         self.runtime = ControlPlaneRuntime(self.synchronizer, dispatcher,
                                            int(os.getenv("BACKFILL_INVENTORY_SYNC_SECONDS", "1800")),
                                            int(os.getenv("BACKFILL_DISPATCH_SECONDS", "3")))

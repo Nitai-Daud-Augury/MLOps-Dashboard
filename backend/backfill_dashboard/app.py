@@ -47,6 +47,7 @@ from .deps import (
     manifest_writer, repository, running_workflows, scanner, settings, workflow_reviews, control_plane,
 )
 from .runtime_mode import runtime_info
+from .outerbounds_actions import WorkflowBackendError
 from .data_sources import describe_data_sources
 from .feature_store_crosscheck import (
     NOT_JUDGED_NOTE as CROSSCHECK_NOT_JUDGED_NOTE,
@@ -119,22 +120,35 @@ def _workflow_mutation_route(method: str, path: str) -> bool:
 
 
 def _monitor_only_workflow_hint() -> str:
-    return f"Workflow operations are disabled in {RUNTIME_INFO.mode} runtime; open Outerbounds for live workflow status."
+    """Why workflow operations are unavailable in this runtime (actionable, no secrets)."""
+    return RUNTIME_INFO.workflow_mutations_error or (
+        f"Workflow operations are unavailable in {RUNTIME_INFO.mode} runtime; open Outerbounds for live workflow status."
+    )
+
+
+def _workflow_unavailable_payload() -> dict:
+    return {"detail": _monitor_only_workflow_hint(), "error_type": RUNTIME_INFO.workflow_mutations_error_type,
+            "runtime": RUNTIME_INFO.mode}
+
+
+def _http_error(exc: Exception, default_status: int) -> HTTPException:
+    """HTTP error for an admin action: backend errors keep their status (503 SP missing, 501 unsupported, ...)."""
+    if isinstance(exc, HTTPException):
+        return exc
+    if isinstance(exc, WorkflowBackendError):
+        return HTTPException(status_code=exc.status_code, detail=str(exc))
+    return HTTPException(status_code=default_status, detail=str(exc))
 
 
 @app.middleware("http")
 async def enforce_runtime_capabilities(request: Request, call_next):
+    # Buttons stay visible in every runtime; when no workflow backend is usable
+    # (Databricks without the Outerbounds SP -> 503, docker -> 403) the request
+    # is answered with an actionable error before any side effect.
     if _workflow_mutation_route(request.method, request.url.path) and not RUNTIME_INFO.workflow_mutations:
         from fastapi.responses import JSONResponse
 
-        return JSONResponse(
-            {
-                "detail": (
-                    f"{_monitor_only_workflow_hint()} This dashboard is monitor-only."
-                )
-            },
-            status_code=403,
-        )
+        return JSONResponse(_workflow_unavailable_payload(), status_code=RUNTIME_INFO.workflow_mutations_status_code)
     return await call_next(request)
 
 
@@ -736,7 +750,8 @@ async def live_workflow_updates(websocket: WebSocket) -> None:
     await websocket.accept()
     if not RUNTIME_INFO.workflow_mutations:
         await websocket.send_json({"workflows": [], "counts": {}, "argo_available": False,
-                                   "hint": f"Workflow operations are disabled in {RUNTIME_INFO.mode} runtime; open Outerbounds for live status."})
+                                   "hint": _monitor_only_workflow_hint(),
+                                   "error_type": RUNTIME_INFO.workflow_mutations_error_type})
         await websocket.close(code=1000)
         return
     try:
@@ -780,9 +795,11 @@ def get_admin_readiness() -> dict:
             fullrlbl_test = {"ready": False, "detail": str(exc)}
         argo = command_builder.ulrpm_orchestrator_readiness()
     else:
-        unavailable = f"Workflow operations are disabled in {RUNTIME_INFO.mode} runtime."
-        fullrlbl_test = {"ready": False, "detail": unavailable}
-        argo = {"ready": False, "detail": unavailable}
+        unavailable = {"ready": False, "detail": _monitor_only_workflow_hint(),
+                       "error_type": RUNTIME_INFO.workflow_mutations_error_type,
+                       "backend": RUNTIME_INFO.workflow_backend}
+        fullrlbl_test = dict(unavailable)
+        argo = dict(unavailable)
     return {
         "manifest_storage": manifest_storage,
         "argo": argo,
@@ -808,7 +825,7 @@ def preflight_workflow(request: CreateWorkflowRequest) -> dict:
     try:
         return command_builder.validate_cli(source)
     except Exception as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise _http_error(exc, 409) from exc
 
 
 @app.get("/api/admin/actions/{action_id}")
@@ -837,7 +854,7 @@ def create_workflow(request: CreateWorkflowRequest, background_tasks: Background
         _require_argo_access()
         cwd, command = command_builder.build_create(source)
     except Exception as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise _http_error(exc, 409) from exc
     action = admin_repository.create(action="create", command=command, cwd=cwd, outerbounds_url=OUTERBOUNDS_RUNS_URL)
     background_tasks.add_task(admin_repository.run, action.id)
     return {"action": asdict(action)}
@@ -957,7 +974,7 @@ def trigger_workflow(request: TriggerWorkflowRequest, background_tasks: Backgrou
         params = TriggerParams(**request.params.model_dump())
         cwd, command = command_builder.build_trigger(source, params)
     except Exception as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise _http_error(exc, 409) from exc
     action = admin_repository.create(action="trigger", command=command, cwd=cwd, outerbounds_url=OUTERBOUNDS_RUNS_URL)
     background_tasks.add_task(admin_repository.run, action.id)
     return {"action": asdict(action)}
@@ -1030,7 +1047,8 @@ def trigger_orchestrated_machine_backfill(
 @app.get("/api/admin/fullrlbl/readiness")
 def get_fullrlbl_readiness() -> dict:
     if not RUNTIME_INFO.workflow_mutations:
-        return {"ready": False, "detail": f"Workflow operations are disabled in {RUNTIME_INFO.mode} runtime."}
+        return {"ready": False, "detail": _monitor_only_workflow_hint(),
+                "error_type": RUNTIME_INFO.workflow_mutations_error_type}
     return command_builder.fullrlbl_test_readiness()
 
 
@@ -1065,7 +1083,7 @@ def trigger_fullrlbl_test(request: FullRlblTestRequestModel, background_tasks: B
         )
         cwd, command = command_builder.build_fullrlbl_test_trigger(params)
     except Exception as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise _http_error(exc, 409) from exc
     action = admin_repository.create(
         action="trigger",
         command=command,
@@ -1090,7 +1108,7 @@ def terminate_workflow(request: TerminateWorkflowRequest, background_tasks: Back
         _require_argo_access()
         cwd, command = command_builder.build_terminate(params)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise _http_error(exc, 400) from exc
     action = admin_repository.create(action="terminate", command=command, cwd=cwd, outerbounds_url=OUTERBOUNDS_RUNS_URL)
     background_tasks.add_task(admin_repository.run, action.id)
     return {"action": asdict(action)}
@@ -1103,7 +1121,7 @@ def lookup_logs(request: LogsRequest, background_tasks: BackgroundTasks) -> dict
     try:
         cwd, command = command_builder.build_logs(source, params)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise _http_error(exc, 400) from exc
     action = admin_repository.create(action="logs", command=command, cwd=cwd, outerbounds_url=OUTERBOUNDS_RUNS_URL)
     background_tasks.add_task(admin_repository.run, action.id)
     return {"action": asdict(action)}

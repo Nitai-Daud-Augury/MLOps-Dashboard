@@ -1,4 +1,4 @@
-import type { ActiveMonth, AdminAction, AdminReadiness, AdminSpec, AdminView, AllMachinesBackfillForm, BackfillScope, BackfillStatus, BusyMachineInfo, DashboardSnapshot, DashboardSummary, EnvironmentTarget, FullRlblTestForm, LogsForm, MachineManifestForm, MachineStatus, MachineView, ManifestResult, MonthStatus, MultiMachineManifestForm, RunningWorkflow, RunningWorkflowsPayload, RuntimeInfo, SandboxEvent, SourceType, StatusPayload, StopForm, Tab, Toast, TriggerForm, WorkflowSourceForm, WorkflowSummaryPayload } from './types';
+import type { ActiveMonth, AdminAction, AdminReadiness, AdminReadinessCheck, AdminSpec, AdminView, AllMachinesBackfillForm, BackfillScope, BackfillStatus, BusyMachineInfo, DashboardSnapshot, DashboardSummary, EnvironmentTarget, FullRlblTestForm, LogsForm, MachineManifestForm, MachineStatus, MachineView, ManifestResult, MonthStatus, MultiMachineManifestForm, RunningWorkflow, RunningWorkflowsPayload, RuntimeInfo, SandboxEvent, SourceType, StatusPayload, StopForm, Tab, Toast, TriggerForm, WorkflowSourceForm, WorkflowSummaryPayload } from './types';
 import { API_BASE, BLOB_SOURCE_STORAGE_KEY, DEFAULT_DEV_NAMESPACE, DEFAULT_OUTERBOUNDS_URL, EMPTY_MACHINES, OUTERBOUNDS_BASE, PROD_ACCOUNT, PROD_CONFIRMATION, PROD_CONTAINER, RECOMMENDED_MACHINE_CONCURRENCY, STATUS_OPTIONS, TEST_ACCOUNT, TEST_CONTAINER } from './constants';
 import { backfillMonthUntil, formatElapsedTime, formatNumber, getCachedJson, orchestratorMonthIndex, orchestratorMonthsThroughToday, utcToday, workflowSocketUrl, writeCachedJson } from './utils';
 import { useToasts } from './hooks';
@@ -221,7 +221,6 @@ function App() {
         darkMode={darkMode}
         onToggleTheme={() => setDarkMode((current) => !current)}
         onToast={addToast}
-        workflowMutationsEnabled={workflowMutationsEnabled}
       /></>
     );
   }
@@ -270,8 +269,6 @@ function App() {
           <span>{apiError}. Start the backend at {API_BASE}.</span>
         </section>
       ) : null}
-
-      {runtimeInfo && !workflowMutationsEnabled ? <section className="notice inline-notice runtime-mode-notice" role="status"><ShieldAlert size={17} /><span><strong>Monitor-only mode ({runtimeInfo.mode}).</strong> Workflow submissions, stops, and CLI log lookups are disabled here; monitoring and standalone manifest creation remain available.</span></section> : null}
 
       <div className={`tab-content from-${tabDirection}`}>
         <p className="subtitle">Monitor coverage and operate FST backfill workflows from one place.</p>
@@ -740,7 +737,6 @@ function MachineDetailPage({
   darkMode,
   onToggleTheme,
   onToast,
-  workflowMutationsEnabled,
 }: {
   payload: StatusPayload | null;
   machine: MachineStatus | null;
@@ -751,7 +747,6 @@ function MachineDetailPage({
   darkMode: boolean;
   onToggleTheme: () => void;
   onToast: (type: Toast['type'], message: string) => void;
-  workflowMutationsEnabled: boolean;
 }) {
   const [machineView, setMachineView] = useState<MachineView>('overview');
   const [activeMonths, setActiveMonths] = useState<Record<number, ActiveMonth>>({});
@@ -801,8 +796,6 @@ function MachineDetailPage({
         </section>
       ) : null}
 
-      {!workflowMutationsEnabled ? <section className="notice inline-notice runtime-mode-notice" role="status"><ShieldAlert size={17} /><span>Monitor-only mode: workflow submissions, stops, and CLI log lookups are disabled. Standalone manifest creation remains available.</span></section> : null}
-
       {machine ? (
         <div className="machine-detail-workspace">
           <aside className="machine-detail-sidebar" aria-label="Machine detail sections">
@@ -827,7 +820,7 @@ function MachineDetailPage({
           <section className="panel"><div className="panel-header"><div><p className="eyebrow">Coverage overview</p><h2>Monthly partition health</h2><p>Review coverage and select a month to inspect its status.</p></div></div><MachineDetails machine={machine} activeMonths={activeMonths} compact /></section>
           </> : null}
           {machineView === 'features' ? <MachineFeatureChart machine={machine} /> : null}
-          {machineView === 'backfill' ? <MachineBackfillPanel key={machine.machine_id} machine={machine} onToast={onToast} workflowMutationsEnabled={workflowMutationsEnabled} /> : null}
+          {machineView === 'backfill' ? <MachineBackfillPanel key={machine.machine_id} machine={machine} onToast={onToast} /> : null}
           {machineView === 'running' ? <MachineRuns machineId={machine.machine_id} mode="running" /> : null}
           {machineView === 'history' ? <MachineRuns machineId={machine.machine_id} mode="history" /> : null}
           {machineView === 'observability' ? <MachineTaskLogs machineId={machine.machine_id} /> : null}
@@ -842,7 +835,7 @@ function MachineDetailPage({
   );
 }
 
-function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { machine: MachineStatus; onToast: (type: Toast['type'], message: string) => void; workflowMutationsEnabled: boolean }) {
+function MachineBackfillPanel({ machine, onToast }: { machine: MachineStatus; onToast: (type: Toast['type'], message: string) => void }) {
   // Disabled until the parent pod receives an authorized control-store credential.
   const perMonthStopsEnabled = false;
   const [selectedMonthIndices, setSelectedMonthIndices] = useState<number[]>([]);
@@ -861,7 +854,6 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
     setSelectedMonthIndices(machine.months.filter(predicate).map((month) => orchestratorMonthIndex(month.partition)));
   };
   const [spec, setSpec] = useState<AdminSpec | null>(null);
-  const mutationsEnabled = workflowMutationsEnabled;
   const [manifestPrefix, setManifestPrefix] = useState('');
   const [dailyManifestPrefix, setDailyManifestPrefix] = useState('');
   const [dailyManifestResult, setDailyManifestResult] = useState<{ manifest_prefix: string; day_count: number; month_count: number; manifests: Array<{ manifest_path: string; since: string; until: string }> } | null>(null);
@@ -1008,7 +1000,6 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
   };
 
   const createAndTrigger = async () => {
-    if (!mutationsEnabled) return;
     if (submissionActive) return;
     if (Object.values(activeMonths).some((item) => ['queued', 'running', 'cancel_requested', 'stopping', 'requeue_pending'].includes(item.state))) {
       onToast('error', 'This machine already has an active backfill. Wait for it to finish or stop it before starting another.');
@@ -1064,7 +1055,6 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
   };
 
   const stopAndRequeue = async (active: ActiveMonth) => {
-    if (!mutationsEnabled) return;
     const downstream: number[] = [];
     const child = active.child_workflow_id || 'the current child workflow';
     const parent = active.parent_workflow_id || 'the parent workflow';
@@ -1089,7 +1079,6 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
   };
 
   const stopEntireBackfill = async () => {
-    if (!mutationsEnabled) return;
     const parents = [...new Set(Object.values(activeMonths).map((item) => item.parent_workflow_id).filter(Boolean))];
     const parent = parents[0];
     if (!parent) { onToast('error', 'No parent workflow ID is available yet. Refresh and try again.'); return; }
@@ -1113,7 +1102,7 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
           <p>Creates manifests according to the selected split (full month, per day, per week, or every N days) and runs the ULRPM parent orchestrator sequentially against the selected target.</p>
         </div>
         <div className="actions">
-        {hasActiveBackfill ? <button className="secondary-button danger" type="button" disabled={!mutationsEnabled || busyAction === 'terminate-parent'} title={!mutationsEnabled ? 'Workflow operations are disabled in monitor-only runtime' : undefined} onClick={() => void stopEntireBackfill()}>{busyAction === 'terminate-parent' ? <Loader2 className="spin" size={16} /> : <Square size={16} />}Stop entire backfill</button> : null}
+        {hasActiveBackfill ? <button className="secondary-button danger" type="button" disabled={busyAction === 'terminate-parent'} onClick={() => void stopEntireBackfill()}>{busyAction === 'terminate-parent' ? <Loader2 className="spin" size={16} /> : <Square size={16} />}Stop entire backfill</button> : null}
         {spec ? (
           <a className="export-link" href={spec.outerbounds_running_url} target="_blank" rel="noreferrer">
             <ExternalLink size={16} />
@@ -1147,7 +1136,7 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
               {busyAction === 'manifest' ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
               <span>Create Manifest</span>
             </button>
-            <button className="primary-button" type="button" onClick={() => void createAndTrigger()} disabled={!mutationsEnabled || (machinePickMode === 'months' ? selectedMonths.length === 0 : !machineRangeStart || !machineRangeEnd) || busyAction !== null || hasActiveBackfill || submissionActive || (trigger.environment === 'prod' && !trigger.confirm_production)} title={!mutationsEnabled ? 'Workflow operations are disabled in monitor-only runtime' : hasActiveBackfill ? 'A backfill is already active for this machine' : submissionActive ? 'Backfill preparation is already in progress' : trigger.environment === 'prod' && !trigger.confirm_production ? 'Check the production confirmation checkbox to enable this run' : undefined}>
+            <button className="primary-button" type="button" onClick={() => void createAndTrigger()} disabled={(machinePickMode === 'months' ? selectedMonths.length === 0 : !machineRangeStart || !machineRangeEnd) || busyAction !== null || hasActiveBackfill || submissionActive || (trigger.environment === 'prod' && !trigger.confirm_production)} title={hasActiveBackfill ? 'A backfill is already active for this machine' : submissionActive ? 'Backfill preparation is already in progress' : trigger.environment === 'prod' && !trigger.confirm_production ? 'Check the production confirmation checkbox to enable this run' : undefined}>
               {busyAction === 'trigger' ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
               <span>Start monthly backfill{selectedMonths.length ? ` (${selectedMonths.length})` : ''}</span>
             </button>
@@ -1233,7 +1222,7 @@ function MachineBackfillPanel({ machine, onToast, workflowMutationsEnabled }: { 
         </div> : null}
       </section>
       {Object.values(activeMonths).some((item) => ['queued', 'running', 'cancel_requested', 'stopping', 'requeue_pending'].includes(item.state)) ? <section className="notice inline-notice"><Zap size={18} /><span>Backfilling: active months are locked to prevent duplicate submissions. Open the Running tab for workflow details.</span></section> : null}
-        {Object.values(activeMonths).filter((item) => ['queued', 'running'].includes(item.state)).map((active) => <div className="actions" key={active.month_index}><span className={`task-phase-badge ${active.state}`}>{machine.months.find((month) => orchestratorMonthIndex(month.partition) === active.month_index)?.partition.label ?? active.month_index} · {active.state}</span>{perMonthStopsEnabled ? <button className="secondary-button danger" type="button" disabled={!mutationsEnabled || busyAction === `cancel-${active.month_index}`} onClick={() => void stopAndRequeue(active)}>{busyAction === `cancel-${active.month_index}` ? <Loader2 className="spin" size={16} /> : <Square size={16} />}Stop month</button> : null}{active.parent_workflow_id ? <a className="icon-link" href={`${OUTERBOUNDS_BASE}?flow_id=UlrpmDevBackfillOrchestratorFlow`} target="_blank" rel="noreferrer" title={`Open ${active.parent_workflow_id} in Outerbounds`}><ExternalLink size={16} /></a> : null}</div>)}
+        {Object.values(activeMonths).filter((item) => ['queued', 'running'].includes(item.state)).map((active) => <div className="actions" key={active.month_index}><span className={`task-phase-badge ${active.state}`}>{machine.months.find((month) => orchestratorMonthIndex(month.partition) === active.month_index)?.partition.label ?? active.month_index} · {active.state}</span>{perMonthStopsEnabled ? <button className="secondary-button danger" type="button" disabled={busyAction === `cancel-${active.month_index}`} onClick={() => void stopAndRequeue(active)}>{busyAction === `cancel-${active.month_index}` ? <Loader2 className="spin" size={16} /> : <Square size={16} />}Stop month</button> : null}{active.parent_workflow_id ? <a className="icon-link" href={`${OUTERBOUNDS_BASE}?flow_id=UlrpmDevBackfillOrchestratorFlow`} target="_blank" rel="noreferrer" title={`Open ${active.parent_workflow_id} in Outerbounds`}><ExternalLink size={16} /></a> : null}</div>)}
       <div className="form-grid">
         <label>
           Environment
@@ -1556,10 +1545,6 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
   }, [adminView, applyWorkflowSummary, workflowMutationsEnabled]);
 
   const submitAdmin = async (path: string, body: object, label = path) => {
-    if (!workflowMutationsEnabled && path !== '/api/admin/manifests/machine' && path !== '/api/admin/manifests/multiple' && path !== '/api/admin/manifests/orchestrated') {
-      setAdminError('Workflow operations are disabled in monitor-only runtime.');
-      return;
-    }
     const isQueuedBackfillTrigger = path === '/api/admin/backfills/orchestrated' || path === '/api/admin/backfills/all';
     if (isQueuedBackfillTrigger) {
       if (triggerRequestInFlight.current || isTriggerPreparationActive(triggerSubmission)) return;
@@ -1851,6 +1836,11 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
   const manifestStorageReady = adminReadiness?.manifest_storage.ready === true;
   const argoReady = adminReadiness?.argo.ready === true;
   const fullrlblReady = adminReadiness?.fullrlbl_test?.ready === true;
+  // A missing Outerbounds service principal must not pre-disable actions: the
+  // backend answers 503 with the exact setup instructions, shown as the result.
+  const spNotConfigured = (check?: AdminReadinessCheck) => check?.error_type === 'outerbounds_sp_not_configured';
+  const argoActionsAllowed = argoReady || spNotConfigured(adminReadiness?.argo);
+  const fullrlblActionsAllowed = fullrlblReady || spNotConfigured(adminReadiness?.fullrlbl_test);
   const readyChecks = [manifestStorageReady, argoReady, fullrlblReady].filter(Boolean).length;
   const summaryCounts = workflowSummary?.counts;
   const activeRuns = summaryCounts?.active ?? 0;
@@ -1944,11 +1934,10 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
   const productionConfirmed = trigger.environment !== 'prod' || trigger.confirm_production;
   const runnerSubmitBlockers = [
     ...(triggerSubmitting || isTriggerPreparationActive(triggerSubmission) ? ['A backfill submission is already in progress.'] : []),
-    ...(!workflowMutationsEnabled ? ['Workflow operations are disabled in monitor-only runtime.'] : []),
     ...(busyAction !== null ? ['Another admin action is still in progress.'] : []),
     ...(adminReadiness === null ? ['Platform readiness checks are still loading.'] : []),
     ...(!manifestStorageReady ? [adminReadiness?.manifest_storage.detail ?? 'Manifest storage is not ready.'] : []),
-    ...(!argoReady ? [adminReadiness?.argo.detail ?? 'Workflow actions are not ready.'] : []),
+    ...(!argoActionsAllowed ? [adminReadiness?.argo.detail ?? 'Workflow actions are not ready.'] : []),
     ...(runnerLockStatusLoading ? ['Machine backfill status is still loading.'] : []),
     ...(selectedRunnerMachineIds.length === 0 ? ['Select at least one machine.'] : []),
     ...(plannedPartitionCount === 0 ? ['Select at least one online, backfillable month.'] : []),
@@ -2003,8 +1992,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
         </nav>
       </aside>
       <div className="admin-workspace-content">
-      {!workflowMutationsEnabled ? <section className="notice inline-notice runtime-mode-notice" role="status"><ShieldAlert size={17} /><span>Monitor-only mode ({spec?.runtime?.mode ?? 'runtime unknown'}): workflow submissions, stops, and CLI log lookups are disabled. Read-only planning and standalone manifest creation remain available.</span></section> : null}
-      <div className="admin-view-panel campaigns-panel"><CampaignWorkspace workflowMutationsEnabled={workflowMutationsEnabled} /></div>
+      <div className="admin-view-panel campaigns-panel"><CampaignWorkspace /></div>
       {adminError ? (
         <section className="notice error">
           <ShieldAlert size={18} />
@@ -2019,7 +2007,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
         </div>
         <div className={argoReady ? 'readiness-item ready' : 'readiness-item blocked'}>
           <strong>Workflow actions</strong>
-          <span>{adminReadiness ? (argoReady ? 'Argo authorization verified' : adminReadiness.argo.detail) : 'Checking permissions...'}</span>
+          <span>{adminReadiness ? (argoReady ? (adminReadiness.argo.backend === 'metaflow' ? (adminReadiness.argo.detail ?? 'Outerbounds service principal configured') : 'Argo authorization verified') : adminReadiness.argo.detail) : 'Checking permissions...'}</span>
         </div>
         <div className={fullrlblReady ? 'readiness-item ready' : 'readiness-item blocked'}>
           <strong>FullRlbl test template</strong>
@@ -2225,7 +2213,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
               {busyAction === 'manifest' ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
               <span>Create Manifest</span>
             </button>
-            <button className="primary-button" type="button" onClick={() => void createManifestAndTrigger()} disabled={!workflowMutationsEnabled || busyAction === 'manifest' || busyAction === 'trigger' || !manifestStorageReady || !argoReady || legacyOneMachineLocked} title={!workflowMutationsEnabled ? 'Workflow operations are disabled in monitor-only runtime' : legacyOneMachineLocked ? 'This machine already has an active backfill' : undefined}>
+            <button className="primary-button" type="button" onClick={() => void createManifestAndTrigger()} disabled={busyAction === 'manifest' || busyAction === 'trigger' || !manifestStorageReady || !argoActionsAllowed || legacyOneMachineLocked} title={legacyOneMachineLocked ? 'This machine already has an active backfill' : undefined}>
               {busyAction === 'trigger' ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
               <span>Run Backfill for This Machine</span>
             </button>
@@ -2277,7 +2265,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
             {busyAction === 'multi-manifest' ? <Loader2 className="spin" size={16} /> : <UploadCloud size={16} />}
             <span>Create Multi-Machine Manifest</span>
           </button>
-          <button className="primary-button" type="button" onClick={() => void createMultiManifestAndTrigger()} disabled={!workflowMutationsEnabled || busyAction !== null || !manifestStorageReady || !argoReady || legacySelectedMachinesLocked} title={!workflowMutationsEnabled ? 'Workflow operations are disabled in monitor-only runtime' : legacySelectedMachinesLocked ? 'A selected machine already has an active backfill' : undefined}>
+          <button className="primary-button" type="button" onClick={() => void createMultiManifestAndTrigger()} disabled={busyAction !== null || !manifestStorageReady || !argoActionsAllowed || legacySelectedMachinesLocked} title={legacySelectedMachinesLocked ? 'A selected machine already has an active backfill' : undefined}>
             {busyAction?.startsWith('scoped backfill') ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
             <span>Run Backfill for Selected Machines</span>
           </button>
@@ -2322,7 +2310,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
               </>
             )}
           </div>
-          <button className="secondary-button" type="button" onClick={() => void submitAdmin('/api/admin/workflows/create', { source }, 'create')} disabled={!workflowMutationsEnabled || busyAction === 'create' || !argoReady}>
+          <button className="secondary-button" type="button" onClick={() => void submitAdmin('/api/admin/workflows/create', { source }, 'create')} disabled={busyAction === 'create' || !argoActionsAllowed}>
             {busyAction === 'create' ? <Loader2 className="spin" size={16} /> : <FileCode2 size={16} />}
             <span>Create Workflow</span>
           </button>
@@ -2383,7 +2371,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
             ) : (
               <p className="concurrency-guidance">Recommended cap: {RECOMMENDED_MACHINE_CONCURRENCY} parallel machine lanes.</p>
             )}
-            <button className="secondary-button" type="button" onClick={() => void createAllMachinesManifestAndTrigger()} disabled={!workflowMutationsEnabled || busyAction === 'all-machines-trigger' || !manifestStorageReady || !argoReady || inventoryHasActiveBackfill} title={!workflowMutationsEnabled ? 'Workflow operations are disabled in monitor-only runtime' : inventoryHasActiveBackfill ? 'An inventory machine already has an active backfill' : undefined}>
+            <button className="secondary-button" type="button" onClick={() => void createAllMachinesManifestAndTrigger()} disabled={busyAction === 'all-machines-trigger' || !manifestStorageReady || !argoActionsAllowed || inventoryHasActiveBackfill} title={inventoryHasActiveBackfill ? 'An inventory machine already has an active backfill' : undefined}>
               {busyAction === 'all-machines-trigger' ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
               <span>Run Backfill for Every Inventory Machine</span>
             </button>
@@ -2471,7 +2459,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
             </label>
           </div>
           <div className="actions">
-            <button className="primary-button" type="button" onClick={() => void triggerFullRlblTest()} disabled={!workflowMutationsEnabled || busyAction === 'fullrlbl-trigger' || !fullrlblReady}>
+            <button className="primary-button" type="button" onClick={() => void triggerFullRlblTest()} disabled={busyAction === 'fullrlbl-trigger' || !fullrlblActionsAllowed}>
               {busyAction === 'fullrlbl-trigger' ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
               <span>
                 {fullrlblForm.machine_ids.trim()
@@ -2531,7 +2519,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
             <div className="argo-unavailable">
               <AlertTriangle size={16} />
               <div>
-                <strong>argo CLI not available locally</strong>
+                <strong>Live workflow status unavailable</strong>
                 <p>{runningWorkflows.hint ?? 'View and stop running workflows directly in Outerbounds.'}</p>
               </div>
               <a className="primary-button" href={runningUrl} target="_blank" rel="noreferrer">
@@ -2576,7 +2564,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
                               },
                             }, `stop-${workflow.workflow_id}`)
                           }
-                          disabled={!workflowMutationsEnabled || busyAction === `stop-${workflow.workflow_id}` || !argoReady}
+                          disabled={busyAction === `stop-${workflow.workflow_id}` || !argoActionsAllowed}
                         >
                           {busyAction === `stop-${workflow.workflow_id}` ? <Loader2 className="spin" size={16} /> : <Square size={16} />}
                         </button>
@@ -2613,7 +2601,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
               </select>
             </label>
           </div>
-          <button className="secondary-button" type="button" onClick={() => void submitAdmin('/api/admin/logs', { source, ...logs }, 'logs')} disabled={!workflowMutationsEnabled || busyAction === 'logs'}>
+          <button className="secondary-button" type="button" onClick={() => void submitAdmin('/api/admin/logs', { source, ...logs }, 'logs')} disabled={busyAction === 'logs'}>
             {busyAction === 'logs' ? <Loader2 className="spin" size={16} /> : <Terminal size={16} />}
             <span>Fetch Logs</span>
           </button>

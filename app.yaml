@@ -4,8 +4,16 @@ command:
 env:
   - name: MLOPS_DASHBOARD_RUNTIME
     value: databricks
+  # Admin workflow actions (trigger / stop / logs) use the Metaflow client on
+  # Databricks and are enabled only once the Outerbounds service principal is
+  # bound below; until then every action answers HTTP 503 with setup steps.
+  # BACKFILL_DISPATCH_ENABLED=1 also starts the campaign dispatcher, which on
+  # Databricks refuses submissions (no idempotent workflow name in the Metaflow
+  # trigger API). The prod target deploys this same file.
   - name: BACKFILL_DISPATCH_ENABLED
-    value: "0"
+    value: "1"
+  # Read into Settings.production_mode but not consumed by any code path today
+  # (inert). Keep "0"; see docs/DEPLOYMENT_RUNBOOK.md.
   - name: BACKFILL_PRODUCTION_MODE
     value: "0"
   - name: ULRPM_MACHINE_IDS_FILE
@@ -53,6 +61,20 @@ env:
     value: default
   - name: OUTERBOUNDS_PROBE_FLOW_ALLOWLIST
     value: FSTBackfill
+  # Outerbounds service principal (SP) for admin actions - NOT bound yet: the
+  # secret does not exist, and an unresolved valueFrom would fail the deploy.
+  # Once it exists, add the two secret resources to resources/mlops_dashboard.app.yml
+  # and uncomment (runbook: "Outerbounds service principal"):
+  # - name: METAFLOW_SERVICE_AUTH_KEY
+  #   valueFrom: outerbounds_sp_auth_key
+  # - name: OBP_METAFLOW_CONFIG_URL
+  #   valueFrom: outerbounds_sp_config_url
+  # - name: OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID
+  #   value: <argo workflow template of FSTBackfill>
+  # - name: OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID
+  #   value: <argo workflow template of UlrpmDevBackfillOrchestratorFlow>
+  # - name: OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID
+  #   value: <argo workflow template of FullRlblDevFstTestFlow>
   - name: MONGODB_URL
     valueFrom: mongodb_url
   - name: FST_PROD_ACCOUNT_NAME
