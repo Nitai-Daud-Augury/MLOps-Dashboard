@@ -2,13 +2,22 @@
 
 Workflow mutations (trigger / terminate / logs / campaign actions) by runtime:
 
-* ``local``      - always enabled; the argo/kubectl CLI backend (unchanged).
-* ``databricks`` - enabled when the Outerbounds service principal (SP) is
-  configured, i.e. both ``METAFLOW_SERVICE_AUTH_KEY`` and
-  ``OBP_METAFLOW_CONFIG_URL`` are set (the same env keys the Outerbounds probe
-  reads). The backend is the Metaflow client (see ``outerbounds_actions``).
-  Without the SP the buttons stay visible and every mutation route answers
-  HTTP 503 with ``workflow_mutations_error`` (never a silent no-op).
+* ``local``      - always enabled; the argo/kubectl CLI backend (unchanged)
+  unless ``OUTERBOUNDS_DISPATCH_BACKEND`` is set explicitly.
+* ``databricks`` - enabled when the selected Outerbounds dispatch backend is
+  configured. ``OUTERBOUNDS_DISPATCH_BACKEND`` picks it:
+
+  - ``github_actions`` - actions run in the ``outerbounds-dispatch.yml`` GitHub
+    Actions workflow (OIDC machine user); needs ``GITHUB_DISPATCH_TOKEN``
+    (see ``github_dispatch`` / ``outerbounds_gha``).
+  - ``metaflow`` - the in-app Metaflow client (``outerbounds_actions``); needs
+    ``METAFLOW_SERVICE_AUTH_KEY`` + ``OBP_METAFLOW_CONFIG_URL``.
+  - unset - ``metaflow`` when ``METAFLOW_SERVICE_AUTH_KEY`` is set, otherwise
+    ``github_actions``.
+
+  When the selected backend is not configured the buttons stay visible and
+  every mutation route answers HTTP 503 with ``workflow_mutations_error``
+  naming both options (never a silent no-op).
 * ``docker``     - no workflow backend is packaged; mutations answer HTTP 403.
 
 Only key *names* are ever reported, never values.
@@ -26,6 +35,11 @@ RUNTIME_MODES = frozenset({"local", "docker", "databricks"})
 OUTERBOUNDS_SP_ENV_KEYS = ("METAFLOW_SERVICE_AUTH_KEY", "OBP_METAFLOW_CONFIG_URL")
 SP_NOT_CONFIGURED = "outerbounds_sp_not_configured"
 NO_WORKFLOW_BACKEND = "runtime_without_workflow_backend"
+GITHUB_DISPATCH_NOT_CONFIGURED = "github_dispatch_not_configured"
+INVALID_DISPATCH_BACKEND = "invalid_dispatch_backend"
+DISPATCH_BACKEND_ENV = "OUTERBOUNDS_DISPATCH_BACKEND"
+DISPATCH_BACKENDS = ("github_actions", "metaflow")
+GITHUB_DISPATCH_TOKEN_ENV = "GITHUB_DISPATCH_TOKEN"
 
 
 class RuntimeConfigurationError(ValueError):
@@ -38,7 +52,7 @@ class RuntimeInfo:
     workflow_mutations: bool
     monitor: bool = True
     manifest_creation: bool = True
-    # "argo_cli" (local), "metaflow" (Databricks Apps) or None (docker).
+    # "argo_cli" (local), "github_actions" / "metaflow" (Databricks Apps) or None (docker).
     workflow_backend: str | None = None
     # Why mutations are unavailable (None when they are available) and the
     # HTTP status the mutation routes answer with.
@@ -93,24 +107,70 @@ def outerbounds_sp_missing_message(environ: Mapping[str, str] | None = None) -> 
         "Outerbounds service principal not configured: set METAFLOW_SERVICE_AUTH_KEY and "
         f"OBP_METAFLOW_CONFIG_URL (missing: {', '.join(missing)}). Bind them to the app from the "
         "Databricks secret scope (docs/DEPLOYMENT_RUNBOOK.md, 'Outerbounds service principal'), "
-        "redeploy, then verify with Admin > Outerbounds probe."
+        "redeploy, then verify with Admin > Outerbounds probe. Alternatively set "
+        f"{DISPATCH_BACKEND_ENV}=github_actions and {GITHUB_DISPATCH_TOKEN_ENV}."
     )
+
+
+def github_dispatch_configured(environ: Mapping[str, str] | None = None) -> bool:
+    return bool(str(_values(environ).get(GITHUB_DISPATCH_TOKEN_ENV) or "").strip())
+
+
+def github_dispatch_missing_message(environ: Mapping[str, str] | None = None) -> str:
+    return (
+        f"Outerbounds actions are not configured. Option 1 (current, {DISPATCH_BACKEND_ENV}=github_actions): set "
+        f"{GITHUB_DISPATCH_TOKEN_ENV} from the Databricks secret mlops-dashboard/github_dispatch_token (fine-grained "
+        "PAT, Actions read/write + Contents read on the dispatch repository) - see docs/DEPLOYMENT_RUNBOOK.md, "
+        "'Outerbounds via GitHub Actions'. Option 2 (metaflow): set METAFLOW_SERVICE_AUTH_KEY and "
+        "OBP_METAFLOW_CONFIG_URL for an Outerbounds service principal. Redeploy, then verify with Admin > "
+        "Outerbounds probe."
+    )
+
+
+def resolve_dispatch_backend(mode: str, environ: Mapping[str, str] | None = None) -> str | None:
+    """The workflow backend name for *mode* ("argo_cli", "metaflow", "github_actions", None), or
+    ``"invalid:<value>"`` for an unknown OUTERBOUNDS_DISPATCH_BACKEND."""
+    values = _values(environ)
+    raw = str(values.get(DISPATCH_BACKEND_ENV) or "").strip().lower()
+    if raw and raw not in DISPATCH_BACKENDS:
+        return f"invalid:{raw[:40]}"
+    if mode == "local":
+        return raw or "argo_cli"
+    if mode == "databricks":
+        if raw:
+            return raw
+        return "metaflow" if str(values.get("METAFLOW_SERVICE_AUTH_KEY") or "").strip() else "github_actions"
+    return None
 
 
 def runtime_info(environ: Mapping[str, str] | None = None) -> RuntimeInfo:
     mode = resolve_runtime(environ)
-    if mode == "local":
-        return RuntimeInfo(mode=mode, workflow_mutations=True, workflow_backend="argo_cli")
-    if mode == "databricks":
-        if outerbounds_sp_configured(environ):
-            return RuntimeInfo(mode=mode, workflow_mutations=True, workflow_backend="metaflow")
+    if mode in {"local", "databricks"}:
+        backend = resolve_dispatch_backend(mode, environ)
+        if backend and backend.startswith("invalid:"):
+            return RuntimeInfo(
+                mode=mode, workflow_mutations=False, workflow_backend=None,
+                workflow_mutations_error=(
+                    f"Invalid {DISPATCH_BACKEND_ENV} {backend[8:]!r}: expected github_actions or metaflow."
+                ),
+                workflow_mutations_error_type=INVALID_DISPATCH_BACKEND, workflow_mutations_status_code=503,
+            )
+        if backend == "argo_cli":
+            return RuntimeInfo(mode=mode, workflow_mutations=True, workflow_backend="argo_cli")
+        if backend == "metaflow":
+            if outerbounds_sp_configured(environ):
+                return RuntimeInfo(mode=mode, workflow_mutations=True, workflow_backend="metaflow")
+            return RuntimeInfo(
+                mode=mode, workflow_mutations=False, workflow_backend="metaflow",
+                workflow_mutations_error=outerbounds_sp_missing_message(environ),
+                workflow_mutations_error_type=SP_NOT_CONFIGURED, workflow_mutations_status_code=503,
+            )
+        if github_dispatch_configured(environ):
+            return RuntimeInfo(mode=mode, workflow_mutations=True, workflow_backend="github_actions")
         return RuntimeInfo(
-            mode=mode,
-            workflow_mutations=False,
-            workflow_backend="metaflow",
-            workflow_mutations_error=outerbounds_sp_missing_message(environ),
-            workflow_mutations_error_type=SP_NOT_CONFIGURED,
-            workflow_mutations_status_code=503,
+            mode=mode, workflow_mutations=False, workflow_backend="github_actions",
+            workflow_mutations_error=github_dispatch_missing_message(environ),
+            workflow_mutations_error_type=GITHUB_DISPATCH_NOT_CONFIGURED, workflow_mutations_status_code=503,
         )
     return RuntimeInfo(
         mode=mode,

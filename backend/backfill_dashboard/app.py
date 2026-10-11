@@ -224,12 +224,15 @@ async def run_outerbounds_probe(request: Request) -> dict:
     flow = body.get("flow")
     deployment_id = body.get("deployment_id")
     include_trigger = body.get("include_trigger", False)
+    include_gha_dispatch = body.get("include_gha_dispatch", False)
     if (flow is not None and not isinstance(flow, str)) or (deployment_id is not None and not isinstance(deployment_id, str)) \
-            or not isinstance(include_trigger, bool):
-        raise HTTPException(status_code=422, detail="flow/deployment_id must be strings and include_trigger a boolean.")
+            or not isinstance(include_trigger, bool) or not isinstance(include_gha_dispatch, bool):
+        raise HTTPException(status_code=422, detail="flow/deployment_id must be strings and include_trigger / "
+                                                    "include_gha_dispatch booleans.")
     try:
         # Stages block (sockets, child processes); keep them off the event loop.
-        return await asyncio.to_thread(outerbounds_probe.run_probe, flow, include_trigger, deployment_id)
+        return await asyncio.to_thread(outerbounds_probe.run_probe, flow, include_trigger, deployment_id,
+                                       include_gha_dispatch)
     except outerbounds_probe.ProbeNotAllowed as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except outerbounds_probe.ProbeBusy as exc:

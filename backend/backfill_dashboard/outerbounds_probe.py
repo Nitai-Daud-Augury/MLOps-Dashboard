@@ -102,6 +102,12 @@ CONFIG_ENV_KEYS = (
     "OUTERBOUNDS_PROBE_DEPLOYMENT_ID",
     "OUTERBOUNDS_PROBE_EXTRA_HOST",
     "OUTERBOUNDS_PROBE_PYTHON",
+    "OUTERBOUNDS_DISPATCH_BACKEND",
+    "GITHUB_DISPATCH_TOKEN",
+    "GITHUB_DISPATCH_REPO",
+    "GITHUB_DISPATCH_REF",
+    "GITHUB_DISPATCH_WORKFLOW",
+    "OUTERBOUNDS_PROBE_GHA_DISPATCH",
 )
 PACKAGE_NAMES = ("ob-metaflow", "ob-metaflow-extensions", "metaflow", "outerbounds")
 STAGES = (
@@ -109,6 +115,7 @@ STAGES = (
     ("packages", "Packages: metaflow import"),
     ("auth", "Auth: Outerbounds credentials"),
     ("list_runs", "List runs (read-only)"),
+    ("github_dispatch", "GitHub Actions dispatch"),
     ("trigger", "Trigger deployment"),
 )
 
@@ -121,6 +128,9 @@ STAGE_DESCRIPTIONS = {
     "auth": "Checks the Outerbounds credential: fetches the remote Metaflow config with it or, with no credential, "
             "pings the metadata service unauthenticated (401/403 expected).",
     "list_runs": "Read-only: lists the 3 latest runs of the allowlisted flow through the Metaflow client.",
+    "github_dispatch": "Read-only: checks the GitHub token, the dispatch repository and that the outerbounds-dispatch "
+                       "workflow exists on the ref with id-token: write. Optionally (OUTERBOUNDS_PROBE_GHA_DISPATCH=1 plus "
+                       "the request option) dispatches action=list_runs, which is read-only on Outerbounds.",
     "trigger": "Triggers the allowlisted deployment. Off unless three explicit gates are set; never runs by default.",
 }
 DETAIL_LIMIT = 4000  # longer text is clipped with an explicit "[+N chars truncated]" marker
@@ -180,6 +190,20 @@ def probe_enabled() -> bool:
 
 def trigger_enabled() -> bool:
     return _env("OUTERBOUNDS_PROBE_TRIGGER_ENABLED").lower() in _TRUE
+
+
+def gha_dispatch_enabled() -> bool:
+    """End-to-end GitHub Actions dispatch (action=list_runs, read-only) is allowed by the probe."""
+    return _env("OUTERBOUNDS_PROBE_GHA_DISPATCH").lower() in _TRUE
+
+
+def _dispatch_backend() -> str | None:
+    from .runtime_mode import runtime_info
+
+    try:
+        return runtime_info().workflow_backend
+    except Exception:  # noqa: BLE001 - an invalid runtime is reported elsewhere
+        return None
 
 
 def _stage_timeout() -> float:
@@ -358,6 +382,14 @@ def describe_config() -> dict[str, Any]:
         "config_keys": config_keys_presence(),
         "python": {"path": interpreter.path, "source": interpreter.source, "ok": interpreter.ok, "error": interpreter.error or None},
         "metaflow_config": {"dir": str(home), "config_file_present": (home / "config.json").is_file()},
+        "dispatch_backend": _dispatch_backend(),
+        "github_dispatch": {
+            "token_configured": bool(_env("GITHUB_DISPATCH_TOKEN")),
+            "repo": _env("GITHUB_DISPATCH_REPO", "Nitai-Daud-Augury/MLOps-Dashboard"),
+            "ref": _env("GITHUB_DISPATCH_REF", "main"),
+            "workflow": _env("GITHUB_DISPATCH_WORKFLOW", "outerbounds-dispatch.yml"),
+            "dispatch_enabled": gha_dispatch_enabled(),
+        },
     }
 
 
@@ -430,7 +462,7 @@ def _check_host(host: str, timeout: float) -> str:
 # --- child process (Metaflow client) ------------------------------------------------
 
 _CHILD_MARKER = "__OB_PROBE_RESULT__"
-_UNRELATED_SECRET_RE = re.compile(r"^(MONGODB_|FST_PROD_ACCOUNT_KEY|AZURE_CLIENT_SECRET|DATABRICKS_CLIENT_SECRET|DATABRICKS_TOKEN)")
+_UNRELATED_SECRET_RE = re.compile(r"^(MONGODB_|FST_PROD_ACCOUNT_KEY|AZURE_CLIENT_SECRET|DATABRICKS_CLIENT_SECRET|DATABRICKS_TOKEN|GITHUB_DISPATCH_TOKEN)")
 
 
 def _child_env(cfg: ProbeConfig) -> dict[str, str]:
@@ -685,6 +717,63 @@ def stage_trigger(cfg: ProbeConfig, ctx: dict[str, Any]) -> dict[str, Any]:
     return _stage("trigger", "fail", f"trigger failed: {out.get('error', '')}", out.get("error_type"), started)
 
 
+def stage_github_dispatch(cfg: ProbeConfig, ctx: dict[str, Any]) -> dict[str, Any]:
+    started = time.monotonic()
+    from . import github_dispatch as gha
+
+    backend = _dispatch_backend()
+    if not _env("GITHUB_DISPATCH_TOKEN"):
+        detail = f"GITHUB_DISPATCH_TOKEN is not set (dispatch backend: {backend or 'none'})"
+        if backend == "github_actions":
+            return _stage("github_dispatch", "fail", detail, gha.NOT_CONFIGURED, started)
+        return _stage("github_dispatch", "skip", f"skipped: {detail}", None, started)
+    try:
+        config = gha.DispatchConfig.from_env()
+        client = gha.GitHubClient(config, timeout=min(cfg.stage_timeout, 15.0))
+        repo = client.get_repo() or {}
+        workflow = client.get_workflow() or {}
+        text = client.get_workflow_file()
+    except gha.GitHubDispatchError as exc:
+        return _stage("github_dispatch", "fail", str(exc), exc.error_type, started)
+    problems = []
+    if str(workflow.get("state") or "") != "active":
+        problems.append(f"workflow state is {workflow.get('state')!r} (enable it in the Actions tab)")
+    if "workflow_dispatch" not in text:
+        problems.append("workflow has no workflow_dispatch trigger")
+    if not re.search(r"(?m)^\s*id-token:\s*write\b", text):
+        problems.append("workflow lacks permissions id-token: write (needed for the Outerbounds OIDC login)")
+    if "service-principal-configure" not in text:
+        problems.append("workflow does not run outerbounds service-principal-configure")
+    visibility = "private" if repo.get("private") else "PUBLIC (workflow logs and artifacts are world-readable)"
+    detail = (f"token can read {config.repo} ({visibility}); workflow {config.workflow} on ref {config.ref}: "
+              f"state={workflow.get('state')}, workflow_dispatch + id-token: write "
+              f"{'present' if not problems else 'NOT all present'}")
+    if problems:
+        return _stage("github_dispatch", "fail", detail + "; " + "; ".join(problems), "github_workflow_invalid", started)
+    if not (gha_dispatch_enabled() and ctx.get("include_gha_dispatch")):
+        reasons = []
+        if not gha_dispatch_enabled():
+            reasons.append("OUTERBOUNDS_PROBE_GHA_DISPATCH is not 1")
+        if not ctx.get("include_gha_dispatch"):
+            reasons.append("request did not set include_gha_dispatch")
+        return _stage("github_dispatch", "pass", detail + "; end-to-end dispatch not run (" + "; ".join(reasons) + ")",
+                      None, started)
+    request_id = f"probe-{ctx.get('probe_id') or uuid.uuid4().hex[:12]}"
+    timeout = float(_env("OUTERBOUNDS_PROBE_GHA_TIMEOUT_SECONDS") or 420)
+    try:
+        inputs = gha.build_inputs("list_runs", request_id, flow=ctx["flow"], params={"limit": 3})
+        result = gha.run_action("list_runs", request_id, inputs, client=client, timeout=max(60.0, min(timeout, 1200.0)))
+    except gha.GitHubDispatchError as exc:
+        return _stage("github_dispatch", "fail", f"{detail}; dispatch list_runs: {exc}", exc.error_type, started)
+    url = result.get("github_run_url")
+    if result.get("ok"):
+        count = len(result.get("workflows") or [])
+        return _stage("github_dispatch", "pass", f"{detail}; dispatched list_runs for {ctx['flow']} ({url}): "
+                      f"Outerbounds login OK, {count} run(s) listed", None, started)
+    return _stage("github_dispatch", "fail", f"{detail}; dispatched list_runs ({url}) failed: "
+                  f"{result.get('error_type')}: {result.get('error')}", str(result.get("error_type") or "github_dispatch_failed"), started)
+
+
 # --- hints: what a stage result means and what to do next --------------------------------
 
 _CREDENTIAL_HINT = ("needs a service-principal credential (METAFLOW_SERVICE_AUTH_KEY / OBP_METAFLOW_CONFIG_URL) "
@@ -697,7 +786,7 @@ _TIMEOUT_HINT = ("The stage hit its time limit and the child was killed. Raise O
 
 
 def _http_status(stage: dict[str, Any]) -> int | None:
-    match = re.fullmatch(r"HTTP(\d{3})", stage.get("error_type") or "")
+    match = re.fullmatch(r"(?:HTTP|github_http_)(\d{3})", stage.get("error_type") or "")
     if not match and stage["id"] == "auth":
         match = re.search(r"\bHTTP (\d{3})\b", stage.get("detail") or "")
     return int(match.group(1)) if match else None
@@ -766,6 +855,32 @@ def stage_hint(stage: dict[str, Any], ctx: dict[str, Any]) -> str:
             return ("Authenticated, but the flow is not visible: check the flow name, OUTERBOUNDS_PERIMETER and that "
                     "the service principal can read this flow.")
         return "Listing runs failed; see the exception and compare with the auth stage."
+    if sid == "github_dispatch":
+        if status == "skip":
+            return ("GitHub Actions dispatch is not configured and not the selected backend; nothing to check. "
+                    "Set GITHUB_DISPATCH_TOKEN to use it.")
+        if err == "github_dispatch_not_configured":
+            return ("The app dispatches Outerbounds actions through GitHub Actions but has no token: create the "
+                    "fine-grained PAT, store it as Databricks secret mlops-dashboard/github_dispatch_token and bind it "
+                    "as GITHUB_DISPATCH_TOKEN (runbook, 'Outerbounds via GitHub Actions').")
+        if err in ("github_http_401",):
+            return "GitHub rejected the token (invalid or expired). Rotate the PAT and update the Databricks secret."
+        if err in ("github_http_403", "github_http_404"):
+            return ("The token cannot see the repository or workflow: the fine-grained PAT must select this repository "
+                    "with Actions read/write and Contents read.")
+        if err == "github_workflow_invalid":
+            return "The workflow file on the dispatch ref is missing a required piece; merge outerbounds-dispatch.yml to it."
+        if err == "workflow_setup_failed":
+            return ("The workflow ran but the Outerbounds OIDC login failed: check that machine user mlops-dashboard-sp "
+                    "trusts this repository (and ref/workflow) and is granted perimeter default.")
+        if err == "github_dispatch_timeout":
+            return "The GitHub run did not finish in time; open the run link. Runner queues can take minutes."
+        if status == "pass" and "end-to-end dispatch not run" in (stage.get("detail") or ""):
+            return ("The token and workflow look right. To prove the Outerbounds login end to end, set "
+                    "OUTERBOUNDS_PROBE_GHA_DISPATCH=1 and tick 'Include GitHub Actions dispatch' (runs list_runs, read-only).")
+        if status == "pass":
+            return "A real GitHub Actions run logged in to Outerbounds as the machine user and listed runs (read-only)."
+        return "The GitHub Actions dispatch failed; see the detail and the run link."
     if sid == "trigger":
         if status == "skip":
             return ("Not run, by design. It needs OUTERBOUNDS_PROBE_TRIGGER_ENABLED=1, include_trigger in the request "
@@ -788,6 +903,7 @@ STAGE_FUNCS = {
     "packages": stage_packages,
     "auth": stage_auth,
     "list_runs": stage_list_runs,
+    "github_dispatch": stage_github_dispatch,
     "trigger": stage_trigger,
 }
 
@@ -810,7 +926,8 @@ def _overall(stages: list[dict[str, Any]]) -> str:
     return "pass"
 
 
-def run_probe(flow: str | None = None, include_trigger: bool = False, deployment_id: str | None = None) -> dict[str, Any]:
+def run_probe(flow: str | None = None, include_trigger: bool = False, deployment_id: str | None = None,
+              include_gha_dispatch: bool = False) -> dict[str, Any]:
     """Run all stages in order. Raises ProbeNotAllowed (422) / ProbeBusy (409)."""
     global _LAST_RESULT
     cfg = ProbeConfig.from_env()
@@ -819,15 +936,17 @@ def run_probe(flow: str | None = None, include_trigger: bool = False, deployment
         raise ProbeBusy("an Outerbounds probe is already running")
     try:
         creds = resolve_credentials()
-        secrets = tuple(item for item in (creds.token, creds.config_url) if item)
+        secrets = tuple(item for item in (creds.token, creds.config_url, _env("GITHUB_DISPATCH_TOKEN")) if item)
+        probe_id = uuid.uuid4().hex[:12]
         ctx: dict[str, Any] = {
+            "probe_id": probe_id,
+            "include_gha_dispatch": bool(include_gha_dispatch),
             "credentials": creds,
             "secrets": secrets,
             "flow": selected,
             "include_trigger": bool(include_trigger),
             "deployment_id": (deployment_id or "").strip(),
         }
-        probe_id = uuid.uuid4().hex[:12]
         started_at = datetime.now(timezone.utc).isoformat()
         started = time.monotonic()
         _log(logging.INFO, f"probe start: probe_id={probe_id} domain={cfg.domain} perimeter={cfg.perimeter} flow={selected} "

@@ -58,7 +58,8 @@ SP_ENV = {
     "OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID": "fstbkfill.prod.ulrpmorchestrator",
     "OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID": "fullrsttest.test.fullrlbl",
 }
-NO_SP_ENV = {"MLOPS_DASHBOARD_RUNTIME": "databricks", "DATABRICKS_APP_PORT": "8000"}
+# The Metaflow backend explicitly (without a key the Databricks default is now github_actions).
+NO_SP_ENV = {"MLOPS_DASHBOARD_RUNTIME": "databricks", "DATABRICKS_APP_PORT": "8000", "OUTERBOUNDS_DISPATCH_BACKEND": "metaflow"}
 
 
 # --- fake metaflow package (child-process tests) ---------------------------------------------

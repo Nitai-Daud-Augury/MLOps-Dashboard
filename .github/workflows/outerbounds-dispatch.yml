@@ -1,0 +1,134 @@
+name: Outerbounds dispatch
+
+# Outerbounds actions for the MLOps Dashboard (Databricks App). The app dispatches
+# this workflow through the GitHub REST API (backend/backfill_dashboard/github_dispatch.py),
+# finds the run by its run-name (ob-<action>-<request_id>), waits for it and downloads the
+# `ob-result-<request_id>` artifact. Authentication to Outerbounds is the OIDC machine
+# user `mlops-dashboard-sp` (type GitHub Actions); no Outerbounds secret is stored here.
+#
+# Security: inputs are caller-controlled. They are passed to the script only through
+# `env:` and validated there; no `${{ inputs.* }}` is ever interpolated into a `run:`
+# script. The run-name below is not a shell, but it is displayed as-is, which is one more
+# reason request_id is validated (^[A-Za-z0-9_-]{8,64}$) by the script.
+run-name: ob-${{ inputs.action }}-${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Outerbounds action
+        type: choice
+        required: true
+        default: list_runs
+        options:
+          - list_runs
+          - status
+          - trigger
+          - terminate
+      flow:
+        description: Flow (FSTBackfill, UlrpmDevBackfillOrchestratorFlow, FullRlblDevFstTestFlow); empty = all for list_runs
+        type: string
+        required: false
+        default: ''
+      deployment_id:
+        description: Deployment (Argo WorkflowTemplate) for trigger; comma list for terminate
+        type: string
+        required: false
+        default: ''
+      params_json:
+        description: JSON object (trigger parameters, or {"limit":20,"running_only":false} for list_runs)
+        type: string
+        required: false
+        default: ''
+      run_id:
+        description: argo-<name> for status / terminate
+        type: string
+        required: false
+        default: ''
+      request_id:
+        description: Idempotency key, 8-64 chars of A-Z a-z 0-9 _ -
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ob-dispatch-${{ inputs.request_id }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Outerbounds action
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Untracked scratch dir in the workspace (runner.temp is not allowed at job level). Only
+      # .ob/result/result.json is uploaded; the Outerbounds config in .ob/metaflowconfig never is.
+      METAFLOW_HOME: ${{ github.workspace }}/.ob/metaflowconfig
+      OB_RESULT_DIR: ${{ github.workspace }}/.ob/result
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Mask parameter values in the log
+        # Reads the inputs from the event payload file (no interpolation) and registers
+        # log masks for parameter values before any step prints its env block.
+        run: python3 scripts/ob_dispatch.py --mask-inputs
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Outerbounds (pinned to the app's versions)
+        # outerbounds 0.12.39 pins ob-metaflow==2.19.34.1 and ob-metaflow-extensions==1.6.24.
+        # Do not install the OSS `metaflow` package: it would overwrite ob-metaflow's module.
+        run: |
+          python -m pip install --quiet 'outerbounds[azure]==0.12.39' 'ob-metaflow==2.19.34.1' 'ob-metaflow-extensions==1.6.24'
+          python -c "import importlib.metadata as m; print({p: m.version(p) for p in ('outerbounds', 'ob-metaflow', 'ob-metaflow-extensions')})"
+
+      - name: Outerbounds login (OIDC machine user)
+        # Exchanges this job's GitHub OIDC JWT (audience: the deployment domain URL)
+        # at auth.augury.obp.outerbounds.com/generate/service-principal and writes
+        # $METAFLOW_HOME/config.json. Fixed arguments only.
+        run: >-
+          outerbounds service-principal-configure
+          --name mlops-dashboard-sp
+          --deployment-domain augury.obp.outerbounds.com
+          --perimeter default
+          --github-actions
+          --force
+
+      - name: Run action
+        env:
+          OB_ACTION: ${{ inputs.action }}
+          OB_FLOW: ${{ inputs.flow }}
+          OB_DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+          OB_PARAMS_JSON: ${{ inputs.params_json }}
+          OB_RUN_ID: ${{ inputs.run_id }}
+          OB_REQUEST_ID: ${{ inputs.request_id }}
+          OB_DISPATCH_DEPLOYMENTS: ${{ vars.OB_DISPATCH_DEPLOYMENTS }}
+          OB_DISPATCH_ALLOW_PROD: ${{ vars.OB_DISPATCH_ALLOW_PROD }}
+          OB_DISPATCH_INCLUDE_PARAMS: ${{ vars.OB_DISPATCH_INCLUDE_PARAMS }}
+          OB_TERMINATE_AUTHORIZE_TOKEN: ${{ secrets.OB_TERMINATE_AUTHORIZE_TOKEN }}
+        run: python scripts/ob_dispatch.py
+
+      - name: Ensure a result file exists
+        if: always()
+        env:
+          OB_ACTION: ${{ inputs.action }}
+          OB_REQUEST_ID: ${{ inputs.request_id }}
+          OB_JOB_STATUS: ${{ job.status }}
+        run: python3 scripts/ob_dispatch.py --ensure-result
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ob-result-${{ inputs.request_id }}
+          path: ${{ github.workspace }}/.ob/result/result.json
+          retention-days: 3
+          if-no-files-found: error

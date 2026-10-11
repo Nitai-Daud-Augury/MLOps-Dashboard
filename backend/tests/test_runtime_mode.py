@@ -61,13 +61,29 @@ def test_invalid_runtime_mode_fails_clearly():
 
 
 SP_CREDS = {"METAFLOW_SERVICE_AUTH_KEY": "sp-key-not-real-123456", "OBP_METAFLOW_CONFIG_URL": "https://api.example.invalid/c"}
+GHA_TOKEN = {"GITHUB_DISPATCH_TOKEN": "github_pat_not_real_0123456789abcdef"}
 
 
 @pytest.mark.parametrize("environ,enabled,backend,error_type", [
     ({"MLOPS_DASHBOARD_RUNTIME": "local"}, True, "argo_cli", None),
     ({"MLOPS_DASHBOARD_RUNTIME": "docker"}, False, None, "runtime_without_workflow_backend"),
-    ({"MLOPS_DASHBOARD_RUNTIME": "databricks"}, False, "metaflow", "outerbounds_sp_not_configured"),
+    # Databricks without a Metaflow key defaults to the GitHub Actions dispatch backend.
+    ({"MLOPS_DASHBOARD_RUNTIME": "databricks"}, False, "github_actions", "github_dispatch_not_configured"),
+    ({"MLOPS_DASHBOARD_RUNTIME": "databricks", **GHA_TOKEN}, True, "github_actions", None),
+    ({"MLOPS_DASHBOARD_RUNTIME": "databricks", "OUTERBOUNDS_DISPATCH_BACKEND": "metaflow"}, False, "metaflow",
+     "outerbounds_sp_not_configured"),
     ({"MLOPS_DASHBOARD_RUNTIME": "databricks", **SP_CREDS}, True, "metaflow", None),
+    # Explicit selection wins over the key-based default.
+    ({"MLOPS_DASHBOARD_RUNTIME": "databricks", **SP_CREDS, "OUTERBOUNDS_DISPATCH_BACKEND": "github_actions"}, False,
+     "github_actions", "github_dispatch_not_configured"),
+    ({"MLOPS_DASHBOARD_RUNTIME": "databricks", **GHA_TOKEN, "OUTERBOUNDS_DISPATCH_BACKEND": " GitHub_Actions "}, True,
+     "github_actions", None),
+    ({"MLOPS_DASHBOARD_RUNTIME": "databricks", "OUTERBOUNDS_DISPATCH_BACKEND": "argo"}, False, None, "invalid_dispatch_backend"),
+    # Local stays argo unless a backend is set explicitly.
+    ({"MLOPS_DASHBOARD_RUNTIME": "local", **GHA_TOKEN}, True, "argo_cli", None),
+    ({"MLOPS_DASHBOARD_RUNTIME": "local", **GHA_TOKEN, "OUTERBOUNDS_DISPATCH_BACKEND": "github_actions"}, True,
+     "github_actions", None),
+    ({"MLOPS_DASHBOARD_RUNTIME": "docker", **GHA_TOKEN}, False, None, "runtime_without_workflow_backend"),
     # Inferred Databricks Apps runtime behaves the same.
     ({"DATABRICKS_APP_PORT": "8000", **SP_CREDS}, True, "metaflow", None),
 ])
@@ -78,11 +94,16 @@ def test_runtime_capabilities_are_safe_and_workflow_gated(environ, enabled, back
     assert info["workflow_mutations_error_type"] == error_type
     assert (info["workflow_mutations_error"] is None) == enabled
     assert "sp-key-not-real" not in repr(info) and "example.invalid" not in repr(info)
+    assert "github_pat_not_real" not in repr(info)
+    if error_type in {"github_dispatch_not_configured", "outerbounds_sp_not_configured"}:
+        # Both options are named whichever backend is selected.
+        assert "GITHUB_DISPATCH_TOKEN" in info["workflow_mutations_error"]
+        assert "METAFLOW_SERVICE_AUTH_KEY" in info["workflow_mutations_error"]
 
 
 @pytest.mark.parametrize("missing", ["METAFLOW_SERVICE_AUTH_KEY", "OBP_METAFLOW_CONFIG_URL"])
 def test_databricks_needs_both_sp_keys_and_names_the_missing_one(missing):
-    environ = {"MLOPS_DASHBOARD_RUNTIME": "databricks", **SP_CREDS, missing: "  "}
+    environ = {"MLOPS_DASHBOARD_RUNTIME": "databricks", "OUTERBOUNDS_DISPATCH_BACKEND": "metaflow", **SP_CREDS, missing: "  "}
     info = runtime_info(environ)
     assert info.workflow_mutations is False and info.workflow_mutations_status_code == 503
     assert info.workflow_mutations_error.startswith(
@@ -110,7 +131,8 @@ _MUTATION_ROUTES = [
 
 
 @pytest.mark.parametrize("environ,status,error_type", [
-    ({"MLOPS_DASHBOARD_RUNTIME": "databricks"}, 503, "outerbounds_sp_not_configured"),
+    ({"MLOPS_DASHBOARD_RUNTIME": "databricks"}, 503, "github_dispatch_not_configured"),
+    ({"MLOPS_DASHBOARD_RUNTIME": "databricks", "OUTERBOUNDS_DISPATCH_BACKEND": "metaflow"}, 503, "outerbounds_sp_not_configured"),
     ({"MLOPS_DASHBOARD_RUNTIME": "docker"}, 403, "runtime_without_workflow_backend"),
 ])
 def test_unavailable_workflow_routes_reject_before_side_effects(monkeypatch, environ, status, error_type):
