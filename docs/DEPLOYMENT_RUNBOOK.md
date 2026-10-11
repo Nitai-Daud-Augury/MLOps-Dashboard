@@ -13,8 +13,8 @@ start a shared app until those owners approve the target workspace and costs.
   section 4f): the app dispatches `.github/workflows/outerbounds-dispatch.yml`, which logs in to
   Outerbounds as the OIDC machine user `mlops-dashboard-sp`. `GITHUB_DISPATCH_TOKEN` is bound from
   secret `mlops-dashboard/github_dispatch_token`; if the token is missing every action answers
-  **HTTP 503** `github_dispatch_not_configured` naming both options. Triggers also need the
-  `OUTERBOUNDS_*_DEPLOYMENT_ID` env vars (not set yet). The in-app Metaflow client backend (section 4e) remains available with
+  **HTTP 503** `github_dispatch_not_configured` naming both options. Triggers use the
+  `OUTERBOUNDS_*_DEPLOYMENT_ID` env vars in `app.yaml` (dev/test deployments; FullRlbl not set yet). The in-app Metaflow client backend (section 4e) remains available with
   `OUTERBOUNDS_DISPATCH_BACKEND=metaflow` and a service-principal key (static machine-user keys were
   rejected with 403). Docker has no workflow backend (403). Scanning reads FST; lifecycle enrichment is
   selected by `LIFECYCLE_SOURCE` (`databricks` in the deployed app manifest, `mongo` by default
@@ -522,8 +522,26 @@ manual Actions-tab dispatch cannot hit production), `OB_DISPATCH_INCLUDE_PARAMS=
 4. The binding is in place: resource `github_dispatch_token` in `resources/mlops_dashboard.app.yml`
    (scope = the bundle's secret-scope variable, key `github_dispatch_token`, `READ`) and
    `GITHUB_DISPATCH_TOKEN` `valueFrom: github_dispatch_token` in `app.yaml`. A deploy fails if the
-   key is missing. To enable triggers, also uncomment the `OUTERBOUNDS_*_DEPLOYMENT_ID` lines in
-   `app.yaml` with the real deployment ids; status, list_runs and the probe work without them.
+   key is missing.
+   Deployment ids (Argo WorkflowTemplate names, set in `app.yaml`; status, list_runs and the probe
+   do not need them):
+
+   | Env var | Value | Notes |
+   |---|---|---|
+   | `OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID` | `fstbackfill.test.devfstmon.fstbackfill-mrqqu` | FSTBackfill, project branch `test` |
+   | `OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID` | `fstbkfill.test.devfstm.ulrpmdeatorflow-hwqbr` | UlrpmDevBackfillOrchestratorFlow, branch `test` |
+   | `OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID` | not set | FullRlblDevFstTestFlow; its trigger reports "deployment id not configured" |
+
+   The dispatch workflow only accepts deployment ids in `OB_DISPATCH_DEPLOYMENTS`: the repository
+   variable if set, otherwise the default in `outerbounds-dispatch.yml`, which lists exactly the ids
+   above (a packaging test keeps them in sync). When a deployment is redeployed under a new name,
+   update both `app.yaml` and that default (or the repository variable).
+   **Prod caveat:** the prod target deploys the same `app.yaml`, so prod would trigger these dev/test
+   templates. Before deploying prod, give it its own values. Bundle variables are not interpolated
+   in `app.yaml`, so the options are a prod target override of the app resource's `config` (env),
+   which must be checked with `bundle validate -t prod` because it may clash with `app.yaml`, or a
+   separate prod source directory/manifest. Also add the prod ids to `OB_DISPATCH_DEPLOYMENTS`
+   (and set `OB_DISPATCH_ALLOW_PROD=1` only if prod namespaces should be dispatchable).
    Rotate the PAT with the same `put-secret` command, then restart the app.
 5. Verify: Admin > Outerbounds probe, stage **GitHub Actions dispatch** (read-only token/workflow
    check). With `OUTERBOUNDS_PROBE_GHA_DISPATCH=1` and *Include GitHub Actions dispatch* it runs

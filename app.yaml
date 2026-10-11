@@ -82,15 +82,19 @@ env:
   # github_dispatch_token in resources/mlops_dashboard.app.yml). Never a literal value.
   - name: GITHUB_DISPATCH_TOKEN
     valueFrom: github_dispatch_token
-  # Deployment ids (Argo WorkflowTemplate names) - NOT set yet: triggers answer
-  # "deployment id not configured" until they are; the probe, status and list_runs
-  # do not need them. Dev defaults the local dashboard uses:
-  # - name: OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID
-  #   value: fstbackfill.test.devcoreme.fstbackfill-zvsui
-  # - name: OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID
-  #   value: fstbkfill.test.devfstm.ulrpmdeatorflow-hwqbr
+  # Deployment ids = Argo WorkflowTemplate names the app triggers through GitHub
+  # Actions. These are DEV/TEST deployments (project branch "test"). The prod
+  # target deploys this same file, so prod triggers would hit these dev templates
+  # until prod gets its own values (see the runbook, section 4f). Keep them in
+  # sync with the OB_DISPATCH_DEPLOYMENTS default in outerbounds-dispatch.yml.
+  - name: OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID
+    value: fstbackfill.test.devfstmon.fstbackfill-mrqqu
+  - name: OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID
+    value: fstbkfill.test.devfstm.ulrpmdeatorflow-hwqbr
+  # FullRlbl test deployment: NOT set yet (name to be confirmed); its trigger
+  # answers "deployment id not configured" until it is.
   # - name: OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID
-  #   value: fullrsttest.test.testulr.fullrlestflow-zsx6n
+  #   value: <FullRlblDevFstTestFlow WorkflowTemplate name>
   # Probe: OUTERBOUNDS_PROBE_GHA_DISPATCH=1 lets Admin > Outerbounds probe dispatch
   # action=list_runs (read-only) on request. Off by default.
   # Alternative backend (OUTERBOUNDS_DISPATCH_BACKEND=metaflow): an Outerbounds

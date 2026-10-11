@@ -110,7 +110,9 @@ jobs:
           OB_PARAMS_JSON: ${{ inputs.params_json }}
           OB_RUN_ID: ${{ inputs.run_id }}
           OB_REQUEST_ID: ${{ inputs.request_id }}
-          OB_DISPATCH_DEPLOYMENTS: ${{ vars.OB_DISPATCH_DEPLOYMENTS }}
+          # Deployment allowlist: the repository variable overrides this default (the dev/test
+          # deployments set in app.yaml). Add the FullRlbl test deployment here once it is known.
+          OB_DISPATCH_DEPLOYMENTS: ${{ vars.OB_DISPATCH_DEPLOYMENTS || 'fstbackfill.test.devfstmon.fstbackfill-mrqqu,fstbkfill.test.devfstm.ulrpmdeatorflow-hwqbr' }}
           OB_DISPATCH_ALLOW_PROD: ${{ vars.OB_DISPATCH_ALLOW_PROD }}
           OB_DISPATCH_INCLUDE_PARAMS: ${{ vars.OB_DISPATCH_INCLUDE_PARAMS }}
           OB_TERMINATE_AUTHORIZE_TOKEN: ${{ secrets.OB_TERMINATE_AUTHORIZE_TOKEN }}
