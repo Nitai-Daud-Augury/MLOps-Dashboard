@@ -2719,3 +2719,59 @@ tbody tr { transition: background-color var(--transition-fast), transform var(--
   .probe-table tr td:first-child { padding-top: 10px; }
   .probe-table tr td:last-child { padding-bottom: 10px; }
 }
+
+/* Features source switch (Blob / Databricks) */
+.features-source-switch { align-items: center; background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--radius-pill); display: inline-flex; gap: 3px; margin-left: auto; padding: 3px; }
+.features-source-label { color: var(--text-secondary); font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 0 6px 0 8px; text-transform: uppercase; }
+.features-source-switch button { align-items: center; background: transparent; border: 0; border-radius: var(--radius-pill); color: var(--text-secondary); cursor: pointer; display: inline-flex; font: inherit; font-size: 13px; gap: 6px; padding: 6px 11px; }
+.features-source-switch button:hover:not(:disabled) { background: var(--bg-elevated); color: var(--text-primary); }
+.features-source-switch button.active { background: var(--accent); color: var(--text-inverse); box-shadow: var(--shadow-sm); }
+.features-source-switch button:disabled { cursor: not-allowed; opacity: .6; }
+.features-source-switch button.active:disabled { opacity: 1; }
+.features-source-banner, .features-source-note { align-items: center; display: flex; flex-wrap: wrap; max-width: 1480px; }
+.features-source-banner { background: var(--warning-bg); border-color: var(--warning-border, var(--warning-bg)); color: var(--warning-text, var(--warning)); }
+.features-source-banner span, .features-source-note span { flex: 1 1 320px; min-width: 0; overflow-wrap: anywhere; }
+.features-source-banner .primary-button { margin-left: auto; }
+.features-source-dialog { max-width: min(560px, calc(100vw - 32px)); }
+.features-source-dialog-warning { align-items: flex-start; background: var(--warning-bg); border-radius: var(--radius-sm); color: var(--warning-text, var(--warning)); display: flex; gap: 8px; margin: 12px 0; padding: 10px 12px; }
+.features-source-dialog-warning svg { flex: 0 0 auto; margin-top: 2px; }
+.features-source-dialog-notes { color: var(--text-secondary); font-size: 13px; margin: 0 0 8px; padding-left: 20px; }
+.features-source-dialog-small { color: var(--text-secondary); font-size: 12px; margin: 0 0 10px; }
+.features-source-dialog-error { background: var(--error-bg); border-radius: var(--radius-sm); color: var(--error-text); margin: 0 0 10px; overflow-wrap: anywhere; padding: 8px 10px; }
+.features-source-dialog .dialog-actions { flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 1100px) {
+  .topbar-inner { flex-wrap: wrap; gap: 10px 16px; padding: 8px 0; }
+  .features-source-switch { margin-left: 0; }
+}
+
+/* Page-level banners (global error, features-source banners): normal document
+   flow below the sticky header, stacked with a gap, long text wraps, never
+   clipped or covered by the header, the admin rail or toasts. */
+.page-banners { display: grid; gap: 10px; margin: 0 auto 14px; max-width: 1480px; min-width: 0; position: relative; z-index: 1; }
+.page-banners:empty { display: none; }
+.page-banners > .notice { margin: 0; max-width: none; }
+.notice { flex-wrap: wrap; min-width: 0; }
+.notice > span, .notice > div { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.notice > svg { flex: 0 0 auto; }
+.notice-actions { align-items: center; display: flex; flex: 0 0 auto !important; gap: 6px; margin-left: auto; }
+.notice-dismiss { align-items: center; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: inherit; cursor: pointer; display: inline-flex; flex: 0 0 auto; height: 30px; justify-content: center; margin-left: auto; opacity: .7; width: 30px; }
+.notice-dismiss:hover { border-color: currentColor; opacity: 1; }
+.features-source-banner.collapsed { padding-bottom: 6px; padding-top: 6px; }
+.features-source-banner.collapsed strong { font-size: 13px; }
+.admin-error-banner { margin: 0 0 14px; position: sticky; top: 0; z-index: 5; }
+/* Toasts sit below the real header height (see useTopbarHeightVar) and wrap. */
+.toast-container { max-width: calc(100vw - 32px); right: 16px; top: calc(var(--topbar-height, 64px) + 12px); }
+.toast { max-width: min(420px, calc(100vw - 32px)); min-width: min(260px, calc(100vw - 32px)); }
+.toast span { min-width: 0; overflow-wrap: anywhere; }
+.toast > svg { flex: 0 0 auto; }
+/* Desktop Admin shell: banners stay in normal flow above the workspace and the
+   shell may scroll (instead of a clipped 100dvh overflow:hidden box); the
+   workspace keeps its own full-viewport-below-header height, so scrolling the
+   page by the banner height shows all of it. The admin rail sits in its grid
+   column instead of being position:fixed over the banners. */
+@media (min-width: 1101px) {
+  .dashboard-shell.admin-shell { height: auto; min-height: 100dvh; overflow: visible; }
+  .admin-shell .page-banners { margin: 12px auto 12px; }
+  .admin-shell .tab-content { height: calc(100dvh - var(--topbar-height, 64px)); }
+  .admin-shell .admin-sidebar { bottom: auto; height: 100%; left: auto; position: relative; top: auto; }
+}

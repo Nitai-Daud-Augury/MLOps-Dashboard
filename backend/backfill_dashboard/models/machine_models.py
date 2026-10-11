@@ -39,6 +39,9 @@ class DashboardSnapshot:
     target_features: list[str]; summary: DashboardSummary; machines: list[MachineStatus]
     warnings: list[str] = field(default_factory=list)
     crosscheck: dict | None = None
+    # Where these results were read from ("blob" | "databricks") and when.
+    features_source: str | None = None
+    features_source_detail: dict | None = None
 
     @classmethod
     def empty(cls, *, account: str, container: str, target_features: list[str]) -> "DashboardSnapshot":

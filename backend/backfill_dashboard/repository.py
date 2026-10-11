@@ -68,7 +68,7 @@ class ReportRepository:
             self._latest = None
             return self._scan_state
 
-    def start_scan(self, *, source_account: str, source_container: str) -> tuple[ScanState, bool]:
+    def start_scan(self, *, source_account: str, source_container: str, features_source: str = "blob") -> tuple[ScanState, bool]:
         """Return (state, is_new). If already running, is_new=False."""
         with self._lock:
             if self._scan_state.running:
@@ -86,6 +86,9 @@ class ReportRepository:
             # Never present a previous source as if it were the currently selected one.
             self._latest = asdict(DashboardSnapshot.empty(account=source_account, container=source_container, target_features=self.settings.target_features))
             self._latest["warnings"] = ["Scan in progress. Completed machines appear as they finish."]
+            # Partial results of this scan come from the newly selected source.
+            self._latest["features_source"] = features_source
+            self._latest["features_source_detail"] = {"source": features_source, "scanned_at": None, "in_progress": True}
             self._cancellations[self._scan_state.scan_id] = threading.Event()
             return self._scan_state, True
 

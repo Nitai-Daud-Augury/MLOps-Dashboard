@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
@@ -25,6 +26,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_SETTING_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _setting_name(name: str) -> str:
+    """Dashboard-wide settings (e.g. ``features_source``) share the control store."""
+    if not _SETTING_NAME_RE.fullmatch(str(name or "")):
+        raise ValueError("setting name must be lower_snake_case")
+    return name
+
+
 def _month_fields(month_index: int) -> tuple[int, int]:
     if not isinstance(month_index, int) or not 0 <= month_index <= current_month_index():
         raise ValueError("month_index must be a valid ULRPM month index through today")
@@ -33,6 +44,9 @@ def _month_fields(month_index: int) -> tuple[int, int]:
 
 class BackfillControlStore(Protocol):
     def get_month_state(self, machine_id: str, month_index: int) -> dict | None: ...
+    def get_setting(self, name: str) -> dict | None: ...
+    def put_setting(self, name: str, record: dict) -> dict: ...
+    def describe_settings_location(self, name: str) -> str: ...
     def list_machine_states(self, machine_id: str) -> list[dict]: ...
     def request_cancel(self, machine_id: str, month_index: int, parent_workflow_id: str, child_workflow_id: str, requested_by: str) -> dict: ...
     def mark_requeue_requested(self, machine_id: str, month_index: int, parent_workflow_id: str, requested_by: str, *, action_id: str | None = None) -> dict: ...
@@ -63,6 +77,31 @@ class JsonControlStore:
     def get_month_state(self, machine_id: str, month_index: int) -> dict | None:
         _month_fields(month_index)
         return self._load().get(self._key(machine_id, month_index))
+
+    # Dashboard-wide settings live next to the month records, in their own file,
+    # so list_machine_states never sees them.
+    def _settings_path(self) -> Path:
+        return self.state_path.with_name(f"{self.state_path.stem}_settings.json")
+
+    def describe_settings_location(self, name: str) -> str:
+        return f"local_json:{self._settings_path()}#{_setting_name(name)}"
+
+    def get_setting(self, name: str) -> dict | None:
+        try:
+            return json.loads(self._settings_path().read_text(encoding="utf-8")).get(_setting_name(name))
+        except FileNotFoundError:
+            return None
+
+    def put_setting(self, name: str, record: dict) -> dict:
+        path = self._settings_path()
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            settings = {}
+        settings[_setting_name(name)] = record
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(settings, indent=2, sort_keys=True), encoding="utf-8")
+        return record
 
     def list_machine_states(self, machine_id: str) -> list[dict]:
         machine_id = validate_machine_id(machine_id)
@@ -132,6 +171,31 @@ class AzureBlobControlStore(JsonControlStore):
                 return None
             raise
 
+    def _setting_blob(self, name: str):
+        from azure.storage.blob import BlobClient
+        from .credentials import ManifestCredentialResolver
+        return BlobClient(
+            account_url=f"https://{self.account_name}.blob.core.windows.net",
+            container_name=self.container_name,
+            blob_name=f"dashboard-control/_settings/{_setting_name(name)}.json",
+            credential=ManifestCredentialResolver().resolve().value,
+        )
+
+    def describe_settings_location(self, name: str) -> str:
+        return f"azure_blob:{self.account_name}/{self.container_name}/dashboard-control/_settings/{_setting_name(name)}.json"
+
+    def get_setting(self, name: str) -> dict | None:
+        try:
+            return json.loads(self._setting_blob(name).download_blob().readall())
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 404 or getattr(exc, "error_code", None) == "BlobNotFound":
+                return None
+            raise
+
+    def put_setting(self, name: str, record: dict) -> dict:
+        self._setting_blob(name).upload_blob(json.dumps(record, sort_keys=True), overwrite=True)
+        return record
+
     def list_machine_states(self, machine_id: str) -> list[dict]:
         from azure.storage.blob import ContainerClient
         from .credentials import ManifestCredentialResolver
@@ -187,6 +251,25 @@ class DatabricksControlStore(JsonControlStore):
     def list_machine_states(self, machine_id: str) -> list[dict]:
         machine_id = validate_machine_id(machine_id)
         return [json.loads(row[0]) for row in self._rows(f"SELECT record_json FROM {self.table} WHERE machine_id = '{machine_id}' ORDER BY month_index")]
+
+    # Settings use a reserved key (month_index -1 never collides with a month record).
+    def describe_settings_location(self, name: str) -> str:
+        return f"databricks:{self.table} (machine_id='__setting__{_setting_name(name)}', month_index=-1)"
+
+    def get_setting(self, name: str) -> dict | None:
+        rows = self._rows(f"SELECT record_json FROM {self.table} WHERE machine_id = '__setting__{_setting_name(name)}' AND month_index = -1")
+        return json.loads(rows[0][0]) if rows else None
+
+    def put_setting(self, name: str, record: dict) -> dict:
+        key = f"__setting__{_setting_name(name)}"
+        payload = json.dumps(record).replace("'", "''")
+        self._rows(
+            f"MERGE INTO {self.table} target USING (SELECT '{key}' machine_id, -1 month_index, '{payload}' record_json) source "
+            "ON target.machine_id = source.machine_id AND target.month_index = source.month_index "
+            "WHEN MATCHED THEN UPDATE SET record_json = source.record_json "
+            "WHEN NOT MATCHED THEN INSERT (machine_id, month_index, record_json) VALUES (source.machine_id, source.month_index, source.record_json)"
+        )
+        return record
 
     def _upsert(self, machine_id: str, month_index: int, mutate) -> dict:
         year, month = _month_fields(month_index)

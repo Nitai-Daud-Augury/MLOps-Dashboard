@@ -52,3 +52,6 @@ class MonthStatus:
     # Informational FEATURES_CROSSCHECK annotation (blob vs feature_store).
     # Never influences status / activity_status.
     crosscheck: dict | None = None
+    # FEATURES_SOURCE=databricks provenance (schema check skipped, copy timestamp,
+    # stale risk). None for blob scans.
+    source_detail: dict | None = None

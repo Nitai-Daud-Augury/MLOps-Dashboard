@@ -40,6 +40,8 @@ def test_databricks_app_manifest_uses_safe_same_origin_runtime():
     assert "DATABRICKS_TOKEN" not in environment
     # Informational cross-check stays opt-in in the deployed app (fail-open).
     assert environment["FEATURES_CROSSCHECK"]["value"] == "off"
+    # Scans read blob by default; Databricks is an explicit, user-selected switch.
+    assert environment["FEATURES_SOURCE"]["value"] == "blob"
     # Outerbounds probe: read-only diagnostics ON, trigger stage hard-off, no token in the manifest.
     assert environment["OUTERBOUNDS_PROBE_ENABLED"]["value"] == "1"
     assert environment["OUTERBOUNDS_PROBE_TRIGGER_ENABLED"]["value"] == "0"

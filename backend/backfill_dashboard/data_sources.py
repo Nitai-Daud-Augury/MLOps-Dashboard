@@ -51,6 +51,7 @@ def describe_data_sources(
     lifecycle_status: str,
     inventory: Any = None,
     last_crosscheck: Any = None,
+    features_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source = resolve_lifecycle_source()
     info: dict[str, Any] = {
@@ -82,6 +83,14 @@ def describe_data_sources(
     # the source of truth for statuses).
     crosscheck = describe_crosscheck_config()
     crosscheck["last_run"] = _last_crosscheck_run(last_crosscheck)
+    if features_source is not None:
+        # FEATURES_SOURCE: active source, the source of the current results and
+        # whether they mismatch (rescan required). See features_source.py.
+        info["features_source"] = features_source
+        if features_source.get("active_source") == "databricks" and crosscheck.get("enabled"):
+            crosscheck["disabled_reason"] = (
+                "Disabled while FEATURES_SOURCE=databricks (statuses already come from feature_store)."
+            )
     info["features_crosscheck"] = crosscheck
     return info
 
@@ -89,6 +98,9 @@ def describe_data_sources(
 def format_data_sources_log(info: dict[str, Any]) -> str:
     keys = ("lifecycle_source", "lifecycle_status", "lifecycle_table", "lifecycle_warehouse_id", "databricks_profile", "databricks_auth", "inventory_source", "machine_count")
     parts = [f"{key}={info[key]}" for key in keys if key in info]
+    features = info.get("features_source")
+    if isinstance(features, dict):
+        parts.append(f"features_source={features.get('active_source') or features.get('source')}")
     crosscheck = info.get("features_crosscheck")
     if isinstance(crosscheck, dict):
         parts.append(f"features_crosscheck={crosscheck.get('mode', 'off')}")

@@ -21,6 +21,12 @@ them as test assets; the badge is informational and does not remove them from in
   the next scan retries the connection and refreshes test-machine badges from Mongo metadata.
   Restart the API after changing `MONGODB_URL` in `.env`, then start a new scan.
 
+Scans read coverage from Azure Blob by default. The **Features: Blob / Databricks** switch in the
+header (default `FEATURES_SOURCE`, persisted in the backfill control store) makes the next scan
+read Databricks `feature_store` instead; a banner asks for a rescan until results match the
+selected source. Databricks mode has no schema completeness check and older backfilled months may
+be stale there. See [runbook 4a2](docs/DEPLOYMENT_RUNBOOK.md).
+
 The scanner uses the checked-in curated cohort at `data/unique_machine_ids.txt`; Mongo does not
 expand that FST scan cohort. Test identity is maintained separately in
 `data/test_machine_ids.txt`, so badges remain available when Mongo metadata is unavailable or a

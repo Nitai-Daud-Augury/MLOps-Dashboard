@@ -29,6 +29,8 @@ from .feature_store_crosscheck import (
     feature_store_table,
     row_tolerance,
 )
+from .feature_store_source import FeatureStoreSource, month_summary
+from .features_source import DATABRICKS_STALE_NOTE, SCHEMA_UNAVAILABLE_NOTE, normalize_source
 from .lifecycle import build_lifecycle_provider, resolve_lifecycle_source
 from .months import orchestrator_month_index, orchestrator_months
 from .parquet_inspector import inspect_feature_partition
@@ -79,6 +81,17 @@ class BackfillScanner:
     # Optional injected FEATURES_CROSSCHECK runner (tests); built lazily when
     # FEATURES_CROSSCHECK=feature_store and left None otherwise.
     feature_crosscheck: Any = None
+    # FEATURES_SOURCE for this scan: "blob" (Parquet partitions in Azure Blob,
+    # the original path) or "databricks" (aggregates from feature_store, see
+    # feature_store_source). Fixed per scan; the UI switch only affects new scans.
+    features_source: str = "blob"
+    # Optional injected FeatureStoreSource (tests); built lazily in databricks mode.
+    feature_store_source: Any = None
+
+    def _features_text(self) -> str:
+        if self.features_source == "databricks":
+            return f"databricks {getattr(self.feature_store_source, 'table', None) or _safe_table()}"
+        return f"blob {self.settings.fst_account}/{self.settings.fst_container}"
 
     def scan(
         self,
@@ -90,6 +103,8 @@ class BackfillScanner:
     ) -> DashboardSnapshot:
         is_cancelled = is_cancelled or (lambda: False)
         self._raise_if_cancelled(is_cancelled)
+        self.features_source = normalize_source(self.features_source) or "blob"
+        databricks_mode = self.features_source == "databricks"
         # Membership is file-based: the scan cohort is exactly the configured
         # machine-ids file (data/unique_machine_ids.txt). LIFECYCLE_SOURCE only
         # enriches these IDs (names, test flag, installation / first-recorded /
@@ -100,8 +115,8 @@ class BackfillScanner:
         ds_log.info(
             f"scan start: scan_id={scan_id} lifecycle={lifecycle_source} (status {self.lifecycle_status}) "
             f"inventory={_inventory_label(self.settings)} ({len(machine_ids)} machines) "
-            f"features=blob {self.settings.fst_account}/{self.settings.fst_container} "
-            f"crosscheck={'feature_store' if crosscheck_enabled() else 'off'}"
+            f"features={self._features_text()} "
+            f"crosscheck={'feature_store' if crosscheck_enabled() and not databricks_mode else ('disabled (features_source=databricks)' if crosscheck_enabled() else 'off')}"
         )
         coverage_ends: dict[str, tuple[int, int]] = {}
         installation_starts: dict[str, tuple[int, int]] = {}
@@ -198,12 +213,17 @@ class BackfillScanner:
         # Full set of months that actually have a Feature Store partition, per
         # machine. Machines whose listing failed are absent (unknown).
         partition_months: dict[str, frozenset[tuple[int, int]]] = {}
-        coverage_starts = self._discover_coverage_starts(
-            machine_ids,
-            progress_callback=progress_callback,
-            is_cancelled=is_cancelled,
-            months_out=partition_months,
-        )
+        dbx: dict[str, Any] | None = None
+        if databricks_mode:
+            dbx = self._fetch_feature_store(machine_ids, lifecycle_inventory, progress_callback)
+            coverage_starts = self._feature_store_coverage(machine_ids, dbx, partition_months)
+        else:
+            coverage_starts = self._discover_coverage_starts(
+                machine_ids,
+                progress_callback=progress_callback,
+                is_cancelled=is_cancelled,
+                months_out=partition_months,
+            )
         self._raise_if_cancelled(is_cancelled)
         # One data-start rule for every lifecycle source:
         # - data_start = earliest evidence of real data (lifecycle firstRecorded
@@ -237,8 +257,11 @@ class BackfillScanner:
         partitions = self._coverage_partitions(calendar_starts)
         # Opt-in feature_store cross-check runs alongside the Parquet scan on its
         # own thread. It is informational only and fail-open.
-        crosscheck_pool, crosscheck_future, crosscheck_runner, crosscheck_error = self._start_crosscheck(
-            machine_ids, partitions, lifecycle_inventory
+        # Disabled in databricks mode: comparing feature_store with itself is
+        # meaningless, and inverting it would read every blob partition.
+        crosscheck_pool, crosscheck_future, crosscheck_runner, crosscheck_error = (
+            (None, None, None, None) if databricks_mode
+            else self._start_crosscheck(machine_ids, partitions, lifecycle_inventory)
         )
         silver_counts = self._load_silver_counts(machine_ids, partitions)
         schema_contract = load_fst_schema_contract(self.settings.canonical_schema_path)
@@ -249,8 +272,9 @@ class BackfillScanner:
 
         month_statuses: list[MonthStatus] = []
         total_partitions = len(machine_ids) * len(partitions)
+        month_phase = "classifying feature_store months" if databricks_mode else "inspecting Parquet partitions"
         if progress_callback:
-            progress_callback(0, total_partitions, "inspecting Parquet partitions")
+            progress_callback(0, total_partitions, month_phase)
         completed_partitions = 0
         completed_by_machine = {machine_id: 0 for machine_id in machine_ids}
         completed_machines = 0
@@ -268,6 +292,7 @@ class BackfillScanner:
                     is_cancelled,
                     data_start=data_starts.get(machine_id),
                     partition_months=partition_months.get(machine_id),
+                    dbx=dbx,
                 ): (
                     machine_id,
                     partition,
@@ -287,11 +312,12 @@ class BackfillScanner:
                         (item for item in month_statuses if item.machine_id == machine_id),
                         key=lambda item: item.partition.index,
                     )
-                    self._apply_canonical_schema(
-                        machine_months,
-                        schema_contract.columns,
-                        schema_contract.schema_version,
-                    )
+                    if not databricks_mode:
+                        self._apply_canonical_schema(
+                            machine_months,
+                            schema_contract.columns,
+                            schema_contract.schema_version,
+                        )
                     if machine_result_callback:
                         machine_result_callback(_tag_lifecycle(self._roll_up_machine(
                             machine_id,
@@ -304,7 +330,7 @@ class BackfillScanner:
                     if machine_progress_callback:
                         machine_progress_callback(completed_machines, len(machine_ids))
                 if progress_callback:
-                    progress_callback(completed_partitions, total_partitions, "inspecting Parquet partitions")
+                    progress_callback(completed_partitions, total_partitions, month_phase)
 
         by_machine = {machine_id: [] for machine_id in machine_ids}
         for month_status in month_statuses:
@@ -333,14 +359,25 @@ class BackfillScanner:
                 "Coverage starts at the first observed Feature Store partition: "
                 f"{global_start[0]}-{global_start[1]:02d}. Earlier months are excluded per machine."
             )
-        warnings.append(
-            "Full-schema completeness is checked against canonical contract "
-            f"{schema_contract.schema_version} ({len(schema_contract.columns)} columns)."
-        )
+        if databricks_mode:
+            warnings.extend(self._feature_store_warnings(dbx))
+        else:
+            warnings.append(
+                "Full-schema completeness is checked against canonical contract "
+                f"{schema_contract.schema_version} ({len(schema_contract.columns)} columns)."
+            )
         if not self.settings.silver_enabled:
             warnings.append("Databricks silver consistency is disabled; enable DATABRICKS_SILVER_ENABLED=1.")
         if crosscheck_summary is not None:
             warnings.append(crosscheck_warning(crosscheck_summary))
+        if databricks_mode and crosscheck_enabled():
+            crosscheck_summary = {
+                "enabled": False,
+                "status": "disabled",
+                "reason": "FEATURES_SOURCE=databricks: the blob-vs-feature_store cross-check is disabled (statuses "
+                          "already come from feature_store; an inverted check would read every blob partition).",
+            }
+            warnings.append(crosscheck_summary["reason"])
 
         if lifecycle_used:
             lifecycle_text = f"{lifecycle_used} ({len(enriched_ids)}/{len(machine_ids)} enriched, status {lifecycle_status})"
@@ -348,6 +385,8 @@ class BackfillScanner:
             lifecycle_text = f"none (source {lifecycle_source}, status {lifecycle_status}, 0/{len(machine_ids)} enriched)"
         if crosscheck_summary is None:
             crosscheck_text = "off"
+        elif crosscheck_summary.get("status") == "disabled":
+            crosscheck_text = "disabled (features_source=databricks)"
         elif crosscheck_summary.get("status") == "error":
             crosscheck_text = "feature_store error (fail-open)"
         else:
@@ -359,14 +398,15 @@ class BackfillScanner:
             )
         ds_log.info(
             f"scan done: scan_id={scan_id} lifecycle={lifecycle_text}, "
-            f"features=blob {self.settings.fst_account}/{self.settings.fst_container} "
+            f"features={self._features_text()} "
             f"({total_partitions} machine-months), crosscheck={crosscheck_text}, "
             f"duration={time.monotonic() - scan_started:.1f}s"
         )
 
+        generated_at = datetime.now(timezone.utc).isoformat()
         return DashboardSnapshot(
             scan_id=scan_id,
-            generated_at=datetime.now(timezone.utc).isoformat(),
+            generated_at=generated_at,
             source_account=self.settings.fst_account,
             source_container=self.settings.fst_container,
             target_features=self.settings.target_features,
@@ -374,7 +414,91 @@ class BackfillScanner:
             machines=machines,
             warnings=warnings,
             crosscheck=crosscheck_summary,
+            features_source=self.features_source,
+            features_source_detail=self._source_detail(dbx, generated_at),
         )
+
+    # --- FEATURES_SOURCE=databricks -------------------------------------------------
+    def _fetch_feature_store(self, machine_ids: list[str], lifecycle_inventory: Any,
+                             progress_callback: Callable[[int, int, str], None] | None) -> dict[str, Any]:
+        """One aggregate fetch for the whole scan; fail-open into ``error``."""
+        if progress_callback:
+            progress_callback(0, len(machine_ids), "querying Databricks feature_store")
+        # Whole ULRPM calendar (2024-08 .. now), like blob discovery which lists every partition.
+        now = datetime.now(timezone.utc)
+        calendar = orchestrator_months(now)
+        start = min(calendar) if calendar else (self.settings.no_data_before_year, self.settings.no_data_before_month)
+        end = (now.year, now.month)
+        started = time.monotonic()
+        try:
+            reader = self.feature_store_source or FeatureStoreSource(lifecycle_inventory=lifecycle_inventory)
+            self.feature_store_source = reader
+            result = reader.fetch(list(machine_ids), start, end, list(self.settings.target_features))
+            result["error"] = None
+        except Exception as exc:  # noqa: BLE001 - fail-open: months become scan_error, no invented gaps
+            ds_log.warning(
+                f"features_source databricks fetch FAILED after {time.monotonic() - started:.1f}s: "
+                f"{ds_log.error_text(exc)} -> every month is scan_error for this scan (fail-open; no gaps invented)"
+            )
+            result = {"data": {}, "present_targets": [], "absent_targets": [], "bronze_versions": None,
+                      "staleness": {"status": "skipped"}, "error": ds_log.error_text(exc)}
+        result["table"] = getattr(self.feature_store_source, "table", None) or _safe_table()
+        if progress_callback:
+            progress_callback(len(machine_ids), len(machine_ids), "querying Databricks feature_store")
+        return result
+
+    @staticmethod
+    def _feature_store_coverage(machine_ids: list[str], dbx: dict[str, Any],
+                                months_out: dict[str, frozenset[tuple[int, int]]]) -> dict[str, tuple[int, int]]:
+        if dbx.get("error"):
+            return {}  # unknown coverage: months_out stays empty for every machine
+        by_machine: dict[str, set[tuple[int, int]]] = {}
+        for (machine, year, month), entry in (dbx.get("data") or {}).items():
+            if int(entry.get("rows") or 0) > 0:
+                by_machine.setdefault(machine, set()).add((year, month))
+        starts = {}
+        for machine_id in machine_ids:
+            months = by_machine.get(machine_id.lower(), set())
+            months_out[machine_id] = frozenset(months)
+            if months:
+                starts[machine_id] = min(months)
+        return starts
+
+    @staticmethod
+    def _feature_store_warnings(dbx: dict[str, Any] | None) -> list[str]:
+        dbx = dbx or {}
+        warnings = [f"Feature coverage read from Databricks {dbx.get('table')} (FEATURES_SOURCE=databricks), not blob."]
+        if dbx.get("error"):
+            warnings.append(
+                f"Databricks feature_store query failed ({dbx['error']}); every month is marked scan_error. "
+                "Retry the scan or switch the source back to Blob."
+            )
+        if dbx.get("absent_targets"):
+            warnings.append(
+                f"Target feature(s) not in {dbx.get('table')}: {', '.join(dbx['absent_targets'])}. Months with rows "
+                "cannot be judged in Databricks mode and are marked scan_error."
+            )
+        warnings.append(SCHEMA_UNAVAILABLE_NOTE)
+        warnings.append(DATABRICKS_STALE_NOTE)
+        return warnings
+
+    def _source_detail(self, dbx: dict[str, Any] | None, scanned_at: str) -> dict[str, Any]:
+        if self.features_source != "databricks":
+            return {"source": "blob", "scanned_at": scanned_at, "account": self.settings.fst_account,
+                    "container": self.settings.fst_container, "schema_check": "available", "notes": []}
+        dbx = dbx or {}
+        return {
+            "source": "databricks",
+            "scanned_at": scanned_at,
+            "table": dbx.get("table"),
+            "schema_check": "not_available",
+            "schema_check_reason": SCHEMA_UNAVAILABLE_NOTE,
+            "staleness": dbx.get("staleness"),
+            "absent_targets": dbx.get("absent_targets") or [],
+            "error": dbx.get("error"),
+            "query_elapsed_s": dbx.get("elapsed_s"),
+            "notes": [DATABRICKS_STALE_NOTE, SCHEMA_UNAVAILABLE_NOTE],
+        }
 
     def _start_crosscheck(
         self,
@@ -455,6 +579,7 @@ class BackfillScanner:
         is_cancelled: Callable[[], bool],
         data_start: tuple[int, int] | None = None,
         partition_months: frozenset[tuple[int, int]] | None = None,
+        dbx: dict[str, Any] | None = None,
     ) -> MonthStatus:
         self._raise_if_cancelled(is_cancelled)
         blob_path = f"machine_id={machine_id}/{partition.blob_path_suffix}"
@@ -483,6 +608,14 @@ class BackfillScanner:
                 activity_status="not_installed",
             )
 
+        if dbx is not None and dbx.get("error"):
+            decision = policy.scan_error(f"Databricks feature_store query failed: {dbx['error']}")
+            return MonthStatus(
+                machine_id=machine_id, partition=partition, status=decision.status, reason=decision.reason,
+                recommended_action=decision.recommended_action, blob_path=blob_path, silver_row_count=silver_rows,
+                error=decision.reason, activity_status="unknown", source_detail=_month_detail(partition, None),
+            )
+
         if not has_partition and (coverage_start is None or partition_key < coverage_start):
             decision = policy.missing_partition_after(
                 partition, policy_start, coverage_end, installation_start
@@ -498,6 +631,10 @@ class BackfillScanner:
                 missing_features=decision.missing_features,
                 activity_status="offline",
             )
+
+        if dbx is not None:
+            return self._feature_store_month(machine_id, partition, policy, dbx, blob_path, silver_rows,
+                                             policy_start, coverage_end, installation_start)
 
         try:
             blob = self.blob_store.read_parquet_metadata(blob_path)
@@ -605,6 +742,59 @@ class BackfillScanner:
                 error=str(exc),
                 activity_status="unknown",
             )
+
+    def _feature_store_month(self, machine_id, partition, policy, dbx, blob_path, silver_rows,
+                             policy_start, coverage_end, installation_start) -> MonthStatus:
+        key = (machine_id.lower(), partition.year, partition.month)
+        entry = (dbx.get("data") or {}).get(key)
+        copy_modified = (dbx.get("bronze_versions") or {}).get(key)
+        detail = _month_detail(partition, copy_modified)
+        if not entry or not int(entry.get("rows") or 0):
+            decision = policy.missing_partition_after(partition, policy_start, coverage_end, installation_start)
+            return MonthStatus(
+                machine_id=machine_id, partition=partition, status=decision.status, reason=decision.reason,
+                recommended_action=decision.recommended_action, blob_path=blob_path, silver_row_count=silver_rows,
+                missing_features=decision.missing_features, activity_status="offline", source_detail=detail,
+            )
+        if dbx.get("absent_targets"):
+            decision = policy.scan_error(
+                f"Target feature(s) not in Databricks feature_store: {', '.join(dbx['absent_targets'])}; "
+                "this month cannot be judged in Databricks mode (switch to Blob)."
+            )
+            return MonthStatus(
+                machine_id=machine_id, partition=partition, status=decision.status, reason=decision.reason,
+                recommended_action=decision.recommended_action, blob_path=blob_path, row_count=int(entry["rows"]),
+                silver_row_count=silver_rows, error=decision.reason, activity_status="online", source_detail=detail,
+            )
+        summary = month_summary(entry, list(dbx.get("present_targets") or []))
+        decision = policy.classify(summary)
+        reason = decision.reason
+        if decision.status == "needs_backfill" and detail.get("stale_risk"):
+            # Live check (Oct 2026): older months backfilled on blob still show null v2 in
+            # feature_store because bronze never re-ingested them. Say so on the gap itself.
+            reason = (
+                f"{reason.rstrip('.')}. Databricks copy may be stale for this month (bronze ingests only the current "
+                f"and previous month; copy version {detail.get('copy_modified') or 'unknown'}): verify on Blob before backfilling."
+            )
+        return MonthStatus(
+            machine_id=machine_id,
+            partition=partition,
+            status=decision.status,
+            reason=reason,
+            recommended_action=decision.recommended_action,
+            blob_path=blob_path,
+            row_count=summary.row_count,
+            silver_row_count=silver_rows,
+            # Version (blob mtime) of the file Databricks ingested, from bronze; not read from blob.
+            last_modified=detail.get("copy_modified"),
+            missing_features=decision.missing_features,
+            zero_count_features=decision.zero_count_features,
+            partial_features=decision.partial_features,
+            feature_coverage_gaps=summary.feature_coverage_gaps,
+            feature_non_null_counts=summary.feature_non_null_counts,
+            activity_status="online" if summary.row_count > 0 else "offline",
+            source_detail=detail,
+        )
 
     def _roll_up_machine(
         self,
@@ -809,6 +999,28 @@ class BackfillScanner:
             values.append(partition(year, month))
             year, month = (year + 1, 1) if month == 12 else (year, month + 1)
         return values
+
+
+def _safe_table() -> str | None:
+    try:
+        return feature_store_table()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _month_detail(partition: MonthPartition, copy_modified: Any) -> dict[str, Any]:
+    """Per-month provenance in databricks mode (schema check skipped, staleness risk)."""
+    now = datetime.now(timezone.utc)
+    previous = (now.year, now.month - 1) if now.month > 1 else (now.year - 1, 12)
+    text = copy_modified.isoformat() if hasattr(copy_modified, "isoformat") else (str(copy_modified) if copy_modified else None)
+    return {
+        "source": "databricks",
+        "schema_check": "not_available",
+        "copy_modified": text,
+        "last_modified_source": "databricks_bronze" if text else None,
+        # Bronze re-ingests only the current and previous month.
+        "stale_risk": (partition.year, partition.month) < previous,
+    }
 
 
 _BLOB_MONTH = re.compile(r"quarter=(\d{4})Q[1-4]/month=(\d{1,2})/partition_version=last/part-0\.parquet$")

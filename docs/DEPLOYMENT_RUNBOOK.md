@@ -173,10 +173,61 @@ curl -s localhost:8000/api/backfill/status | python3 -m json.tool | grep -A8 dat
 To switch locally, set `LIFECYCLE_SOURCE=mongo` or `databricks` in `.env` and restart the API
 (`npm run api`), then start a new scan.
 
+### 4a2. Features source switch (`FEATURES_SOURCE`, Blob / Databricks)
+
+Scans can read Feature Store coverage from **Azure Blob** (default, the FST Parquet partitions)
+or from **Databricks** `dih_prod.silver_mh.feature_store` (`DATABRICKS_FEATURE_STORE_TABLE`).
+`FEATURES_SOURCE=blob|databricks` sets the default (`app.yaml`: `blob`; prod shares the file).
+Users switch it with the **Features: Blob / Databricks** selector in the dashboard header
+(`GET` / `PUT /api/settings/features-source`, body `{"source": "databricks"}`).
+
+- **Persistence.** The choice is the `features_source` setting in the backfill control store
+  (`BACKFILL_CONTROL_STORE`): Azure blob `dashboard-control/_settings/features_source.json` in
+  `FST_BACKFILL_ACCOUNT_NAME`/`FST_BACKFILL_CONTAINER_NAME` (default), the UC control table
+  (row `machine_id='__setting__features_source'`, `month_index=-1`) or `local_json`. That
+  survives an Apps restart. If the store cannot be written (the app has no
+  `FST_BACKFILL_ACCOUNT_KEY` / SAS / Key Vault access today), the switch still applies, is
+  kept in memory plus `/tmp/ulrpm_backfill_features_source.json`, and the API/UI report
+  `durable: false` with the error: on Apps that copy is lost on restart and the env default
+  returns. The persisted value is loaded in the background at first use (never blocks).
+- **Rescan required.** Every snapshot is tagged with `features_source` and
+  `features_source_detail.scanned_at`. `/api/backfill/status` -> `data_sources.features_source`
+  reports `active_source`, `results_source`, `mismatch` and `rescan_required`; the UI shows a
+  banner with **Rescan now** until a scan from the new source completes. Snapshots from before
+  this feature count as blob. Switching while a scan runs answers **409**. The switch does not
+  touch running backfills, admin actions or month locks.
+- **Databricks mode.** One column probe (`SELECT * ... LIMIT 0`) plus one aggregate per scan
+  (`machine_id IN (...)`, `recorded_at` range pushed down) returns per machine/month the row
+  count, the non-null count of every target feature and the rows where the v1 column is set but
+  the v2 target is null. These feed the same `BackfillDecisionPolicy` as blob, so **needs
+  backfill** means: a month with rows where a target is all null or missing on v1 rows, or a
+  missing month after the machine's first data month (same lifecycle/installation rules).
+  Gaps in months older than the previous month carry "Databricks copy may be stale ... verify on
+  Blob before backfilling": a live read-only check on 3 machines (2026-10-11) showed months that
+  are backfilled on blob still with null v2 in feature_store. Use Blob for backfill decisions.
+  Same SQL path as lifecycle (shared Config, serialized tokens, cold/steady timeouts, one cold
+  retry) plus `FEATURES_SOURCE_TIMEOUT_SECONDS` (default 300). Fail-open: on a timeout/error the
+  scan completes with every month `scan_error` and a warning; no gap is invented.
+- **Known limits.** The schema completeness check is **not available** (feature_store lacks 23
+  canonical FST columns and collapses 11 case-duplicate pairs); missing columns are never
+  reported as gaps. Bronze re-ingests only the current and previous month, so older backfilled
+  months can be stale: months show the blob file version Databricks holds (bronze
+  `_file_modification_time`, `last_modified_source=databricks_bronze`) and `stale_risk`. Blob is
+  not read in this mode (the per-month Feature graph still reads blob on demand).
+- **Cross-check.** With `FEATURES_SOURCE=databricks` the blob-vs-feature_store cross-check is
+  disabled (`crosscheck.status=disabled`): comparing feature_store with itself is meaningless and
+  an inverted check would read every blob partition, which is what this mode avoids. With blob,
+  `FEATURES_CROSSCHECK` behaves as before.
+- **Grants.** The app service principal needs `SELECT` on the feature_store table (and on the
+  bronze table for copy timestamps) through the bound warehouse.
+- **Logs.** `[data-source] features source switched: blob -> databricks by <email> at <ts>
+  (persisted to <location>)`, `scan requested: ... features_source=...`, `scan start/done:
+  features=databricks <table>` and `features_source databricks: table=... machine_months=...`.
+
 ### 4b. Optional Feature Store cross-check (`FEATURES_CROSSCHECK`)
 
-Azure Blob (FST Parquet partitions) is the **only** source of truth for scan
-statuses. `FEATURES_CROSSCHECK=feature_store` (default off/empty) adds an
+With `FEATURES_SOURCE=blob` (default), Azure Blob (FST Parquet partitions) is the source of
+truth for scan statuses (see 4a2 for the Databricks source). `FEATURES_CROSSCHECK=feature_store` (default off/empty) adds an
 informational comparison against Databricks `dih_prod.silver_mh.feature_store`
 (override with `DATABRICKS_FEATURE_STORE_TABLE`). It never changes a month or
 machine status.
