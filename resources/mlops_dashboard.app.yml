@@ -34,3 +34,12 @@ resources:
             scope: ${var.mongodb_secret_scope}
             key: github_dispatch_token
             permission: READ
+        # Backfill manifest + control-store credential: a container-scoped SAS
+        # (permissions rcwl, HTTPS only, with an expiry) for aifleetmlopsfstbackfill/fst-backfill,
+        # exposed as FST_BACKFILL_SAS_TOKEN (app.yaml). This is a different account from the
+        # FST read store above. Create the key BEFORE deploying, or the deploy fails.
+        - name: fst_backfill_manifest_sas
+          secret:
+            scope: ${var.mongodb_secret_scope}
+            key: fst_backfill_manifest_sas
+            permission: READ

@@ -34,6 +34,12 @@ def test_databricks_app_manifest_uses_safe_same_origin_runtime():
     assert environment["FST_PROD_ACCOUNT_NAME"]["value"] == "auguryprodfsthns"
     assert environment["FST_PROD_CONTAINER"]["value"] == "feature-store-container"
     assert environment["FST_PROD_ACCOUNT_KEY"]["valueFrom"] == "fst_account_key"
+    # Manifest upload / control store: separate account, SAS from a secret, no Key Vault on Apps.
+    assert environment["FST_BACKFILL_ACCOUNT_NAME"]["value"] == "aifleetmlopsfstbackfill"
+    assert environment["FST_BACKFILL_CONTAINER_NAME"]["value"] == "fst-backfill"
+    assert environment["FST_BACKFILL_SAS_TOKEN"] == {"name": "FST_BACKFILL_SAS_TOKEN", "valueFrom": "fst_backfill_manifest_sas"}
+    assert "FST_BACKFILL_ACCOUNT_KEY" not in environment
+    assert not any(key in environment for key in ("AZURE_STORAGE_KEY", "AZURE_STORAGE_SAS_TOKEN", "AZURE_STORAGE_CONNECTION_STRING"))
     assert "value" not in environment["FST_PROD_ACCOUNT_KEY"]
     # Apps auth is the app service principal; never ship a developer CLI profile.
     assert "DATABRICKS_PROFILE" not in environment
@@ -114,6 +120,11 @@ def test_databricks_bundle_names_sources_targets_and_secret_binding_are_safe():
         {"name": "github_dispatch_token", "secret": {
             "scope": "${var.mongodb_secret_scope}",
             "key": "github_dispatch_token",
+            "permission": "READ",
+        }},
+        {"name": "fst_backfill_manifest_sas", "secret": {
+            "scope": "${var.mongodb_secret_scope}",
+            "key": "fst_backfill_manifest_sas",
             "permission": "READ",
         }},
     ]

@@ -578,3 +578,12 @@ def test_long_detail_is_never_silently_truncated(monkeypatch):
     clipped = probe._clip("y" * (probe.DETAIL_LIMIT + 25), probe.DETAIL_LIMIT)
     assert clipped.endswith("[+25 chars truncated]")
 
+
+
+def test_child_env_drops_storage_credentials(monkeypatch):
+    for key in ("FST_BACKFILL_SAS_TOKEN", "FST_BACKFILL_ACCOUNT_KEY", "AZURE_STORAGE_KEY", "AZURE_STORAGE_SAS_TOKEN"):
+        monkeypatch.setenv(key, "fake-secret-value")
+    monkeypatch.setenv("FST_BACKFILL_ACCOUNT_NAME", "aifleetmlopsfstbackfill")
+    env = probe._child_env(probe.ProbeConfig.from_env())
+    assert not any(key in env for key in ("FST_BACKFILL_SAS_TOKEN", "FST_BACKFILL_ACCOUNT_KEY", "AZURE_STORAGE_KEY", "AZURE_STORAGE_SAS_TOKEN"))
+    assert env["FST_BACKFILL_ACCOUNT_NAME"] == "aifleetmlopsfstbackfill"
