@@ -11,9 +11,10 @@ start a shared app until those owners approve the target workspace and costs.
 - Admin workflow actions (trigger, stop, cancel/requeue) run locally through the argo/kubectl
   CLIs. On Databricks Apps they run through **GitHub Actions** (`OUTERBOUNDS_DISPATCH_BACKEND=github_actions`,
   section 4f): the app dispatches `.github/workflows/outerbounds-dispatch.yml`, which logs in to
-  Outerbounds as the OIDC machine user `mlops-dashboard-sp`. Until `GITHUB_DISPATCH_TOKEN` is bound
-  the buttons stay enabled and every action answers **HTTP 503** `github_dispatch_not_configured`
-  naming both options. The in-app Metaflow client backend (section 4e) remains available with
+  Outerbounds as the OIDC machine user `mlops-dashboard-sp`. `GITHUB_DISPATCH_TOKEN` is bound from
+  secret `mlops-dashboard/github_dispatch_token`; if the token is missing every action answers
+  **HTTP 503** `github_dispatch_not_configured` naming both options. Triggers also need the
+  `OUTERBOUNDS_*_DEPLOYMENT_ID` env vars (not set yet). The in-app Metaflow client backend (section 4e) remains available with
   `OUTERBOUNDS_DISPATCH_BACKEND=metaflow` and a service-principal key (static machine-user keys were
   rejected with 403). Docker has no workflow backend (403). Scanning reads FST; lifecycle enrichment is
   selected by `LIFECYCLE_SOURCE` (`databricks` in the deployed app manifest, `mongo` by default
@@ -514,9 +515,16 @@ manual Actions-tab dispatch cannot hit production), `OB_DISPATCH_INCLUDE_PARAMS=
    Nitai-Daud-Augury, *Only select repositories* = MLOps-Dashboard, permissions **Actions: Read and
    write**, **Contents: Read-only** (Metadata read is implied), short expiry.
 3. `databricks secrets put-secret mlops-dashboard github_dispatch_token -p mlops-dev` (paste at the
-   prompt; never on the command line).
-4. Uncomment the `github_dispatch_token` resource in `resources/mlops_dashboard.app.yml` and the
-   `GITHUB_DISPATCH_TOKEN` / `OUTERBOUNDS_*_DEPLOYMENT_ID` lines in `app.yaml`; deploy.
+   prompt; never on the command line). Check with
+   `databricks secrets list-secrets mlops-dashboard -p mlops-dev` (key names only) and confirm the
+   app service principal has `READ` on the scope (`databricks secrets list-acls mlops-dashboard`).
+   The same key must exist in the prod target's workspace scope before a prod deploy.
+4. The binding is in place: resource `github_dispatch_token` in `resources/mlops_dashboard.app.yml`
+   (scope = the bundle's secret-scope variable, key `github_dispatch_token`, `READ`) and
+   `GITHUB_DISPATCH_TOKEN` `valueFrom: github_dispatch_token` in `app.yaml`. A deploy fails if the
+   key is missing. To enable triggers, also uncomment the `OUTERBOUNDS_*_DEPLOYMENT_ID` lines in
+   `app.yaml` with the real deployment ids; status, list_runs and the probe work without them.
+   Rotate the PAT with the same `put-secret` command, then restart the app.
 5. Verify: Admin > Outerbounds probe, stage **GitHub Actions dispatch** (read-only token/workflow
    check). With `OUTERBOUNDS_PROBE_GHA_DISPATCH=1` and *Include GitHub Actions dispatch* it runs
    `action=list_runs` end to end.
