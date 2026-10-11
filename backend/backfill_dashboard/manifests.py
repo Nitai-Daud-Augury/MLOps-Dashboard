@@ -189,7 +189,13 @@ class BackfillManifestWriter:
     def readiness(self) -> dict[str, str | bool]:
         credential = self.credential_resolver.resolve()
         try:
-            self._container().get_container_properties()
+            container = self._container()
+            if credential.kind == "sas_token":
+                # A container-scoped (service / user-delegation) SAS cannot read container
+                # properties; listing one blob proves the token is valid (needs "l").
+                next(iter(container.list_blobs(results_per_page=1).by_page()), None)
+            else:
+                container.get_container_properties()
         except Exception as exc:
             error_code = getattr(exc, "error_code", None)
             detail = error_code or exc.__class__.__name__

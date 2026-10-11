@@ -109,3 +109,14 @@ env:
     value: feature-store-container
   - name: FST_PROD_ACCOUNT_KEY
     valueFrom: fst_account_key
+  # Backfill manifest upload and the dashboard control store (features-source setting,
+  # month locks) write to a separate account. Credential order in credentials.py:
+  # FST_BACKFILL_ACCOUNT_KEY, then FST_BACKFILL_SAS_TOKEN, then Key Vault metaflow-iac-kv
+  # (unreachable from Apps). Never set AZURE_STORAGE_KEY / AZURE_STORAGE_SAS_TOKEN here:
+  # the FST read path falls back to them too.
+  - name: FST_BACKFILL_ACCOUNT_NAME
+    value: aifleetmlopsfstbackfill
+  - name: FST_BACKFILL_CONTAINER_NAME
+    value: fst-backfill
+  - name: FST_BACKFILL_SAS_TOKEN
+    valueFrom: fst_backfill_manifest_sas

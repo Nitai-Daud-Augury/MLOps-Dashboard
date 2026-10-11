@@ -547,6 +547,43 @@ manual Actions-tab dispatch cannot hit production), `OB_DISPATCH_INCLUDE_PARAMS=
    check). With `OUTERBOUNDS_PROBE_GHA_DISPATCH=1` and *Include GitHub Actions dispatch* it runs
    `action=list_runs` end to end.
 
+### 4g. Backfill manifest + control-store credential (`FST_BACKFILL_SAS_TOKEN`)
+
+Backfill submissions upload Parquet manifests to `aifleetmlopsfstbackfill/fst-backfill`
+(`FST_BACKFILL_ACCOUNT_NAME` / `FST_BACKFILL_CONTAINER_NAME`; paths
+`YYYY/MM/DD/dashboard/{single-machine,multi-machine,orchestrator}/...` and `daily-gaps/...`), and the
+dashboard control store keeps month locks and settings (e.g. the features-source switch) under
+`dashboard-control/` in the same container. This is **not** the FST read account
+(`auguryprodfsthns`, `fst_prod_account_key`). Credential order (`credentials.py`):
+`FST_BACKFILL_ACCOUNT_KEY`, then `FST_BACKFILL_SAS_TOKEN`, then Key Vault `metaflow-iac-kv` secret
+`FST-BACKFILL-ACCOUNT-KEY` through `DefaultAzureCredential`. The last one fails on Databricks Apps:
+the app's identity is a Databricks service principal, not an Azure managed identity, so granting
+Key Vault access would need an Entra app registration plus a federated credential and code to use it.
+
+The app binds a **container-scoped SAS** (`sp=rcwl`, HTTPS only, with an expiry) from secret
+`mlops-dashboard/fst_backfill_manifest_sas`. Needed operations: create/overwrite blobs (`c`,`w`),
+read and list control records (`r`,`l`); no delete. Readiness lists one blob with a SAS, because a
+service SAS cannot read container properties. The account has no hierarchical namespace, so a
+directory-scoped SAS is not available; the scope is the whole `fst-backfill` container.
+
+Create the secret **before** deploying a bundle that binds it (an unresolved secret fails the
+deploy). Account-key SAS (90 days), without echoing anything:
+
+```bash
+( umask 077
+  export AZURE_STORAGE_KEY="$(az keyvault secret show --vault-name metaflow-iac-kv \
+      -n FST-BACKFILL-ACCOUNT-KEY --query value -o tsv)"
+  az storage container generate-sas --account-name aifleetmlopsfstbackfill --name fst-backfill \
+      --permissions rcwl --https-only --expiry "$(date -u -v+90d +%Y-%m-%dT%H:%MZ)" -o tsv \
+    | tr -d '\r\n' | databricks secrets put-secret mlops-dashboard fst_backfill_manifest_sas -p mlops-dev
+  unset AZURE_STORAGE_KEY )
+```
+
+Rotate before expiry with the same command, then restart the app. When the SAS expires,
+Admin readiness reports manifest storage not ready (`AuthenticationFailed`). An ad hoc SAS can only be
+revoked by rotating the account key; for revocation without that, generate it with a stored
+access policy (`--policy-name`). Fallback: bind the account key itself as `FST_BACKFILL_ACCOUNT_KEY`.
+
 ## 4. Provision FST access and network reachability
 
 This is a required external setup item before expecting a Databricks deployment to complete an
@@ -554,7 +591,7 @@ FST scan. The current Bundle binds Mongo only. The deployment owner must separat
 provision a least-privilege FST read credential/identity that Databricks Apps can use to reach the
 approved Azure Blob account/container, and confirm workspace network egress. FST account key is
 mapped as a Bundle secret resource when the scope contains `fst_prod_account_key`. Manifest
-upload needs a separate write credential and is not required for monitor-only operation.
+upload needs a separate write credential (section 4g) and is not required for monitor-only operation.
 Silver feature comparison (`DATABRICKS_SILVER_ENABLED`) remains disabled by default; the same
 SQL warehouse resource now also serves `LIFECYCLE_SOURCE=databricks` machines_raw lookups.
 

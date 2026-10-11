@@ -361,3 +361,60 @@ def test_render_manifest_table_schema():
     table = render_manifest_table(planned)
     assert table.column_names == ["machine_id", "since", "until"]
     assert table.to_pydict()["since"] == ["2026/03/01/00"]
+
+
+class _ReadinessContainer:
+    def __init__(self, *, fail: Exception | None = None) -> None:
+        self.calls: list[str] = []
+        self.fail = fail
+
+    def get_container_properties(self):
+        self.calls.append("properties")
+        if self.fail:
+            raise self.fail
+        return {}
+
+    def list_blobs(self, **kwargs):
+        self.calls.append(f"list_blobs:{kwargs.get('results_per_page')}")
+        if self.fail:
+            raise self.fail
+        return _OnePage()
+
+
+class _OnePage:
+    def by_page(self):
+        return iter([iter([])])
+
+
+def test_readiness_with_sas_lists_one_blob_instead_of_reading_container_properties(monkeypatch):
+    resolver = ManifestCredentialResolver(environment={"FST_BACKFILL_SAS_TOKEN": "sv=2024&sig=fake"},
+                                          key_vault_loader=lambda: pytest.fail("Key Vault must not be used"))
+    writer = BackfillManifestWriter(account_name="acct", container_name="box", credential_resolver=resolver)
+    container = _ReadinessContainer()
+    monkeypatch.setattr(writer, "_container", lambda: container)
+    ready = writer.readiness()
+    assert container.calls == ["list_blobs:1"]
+    assert ready["ready"] is True and ready["credential_kind"] == "sas_token" and ready["credential_source"] == "environment"
+    assert "sig=fake" not in str(ready)
+
+
+def test_readiness_with_account_key_still_reads_container_properties(monkeypatch):
+    resolver = ManifestCredentialResolver(environment={"FST_BACKFILL_ACCOUNT_KEY": "fake-key"},
+                                          key_vault_loader=lambda: pytest.fail("Key Vault must not be used"))
+    writer = BackfillManifestWriter(account_name="acct", container_name="box", credential_resolver=resolver)
+    container = _ReadinessContainer()
+    monkeypatch.setattr(writer, "_container", lambda: container)
+    assert writer.readiness()["credential_kind"] == "account_key"
+    assert container.calls == ["properties"]
+
+
+def test_readiness_with_sas_reports_access_failure_without_the_token(monkeypatch):
+    class Denied(Exception):
+        error_code = "AuthorizationPermissionMismatch"
+    resolver = ManifestCredentialResolver(environment={"FST_BACKFILL_SAS_TOKEN": "sv=2024&sig=fake"})
+    writer = BackfillManifestWriter(account_name="acct", container_name="box", credential_resolver=resolver)
+    monkeypatch.setattr(writer, "_container", lambda: _ReadinessContainer(fail=Denied()))
+    with pytest.raises(RuntimeError, match="cannot access acct/box using the environment credential "
+                                           r"\(AuthorizationPermissionMismatch\)") as error:
+        writer.readiness()
+    assert "sig=fake" not in str(error.value)
