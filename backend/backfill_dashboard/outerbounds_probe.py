@@ -4,7 +4,8 @@ Answers "can this dashboard (locally or inside Databricks Apps) reach and
 authenticate to Outerbounds, and list runs of an allowlisted flow?" with a
 small staged report. Every stage returns::
 
-    {"id", "name", "status": pass|fail|skip|expected_fail, "detail", "error_type", "ms"}
+    {"id", "name", "status": pass|fail|skip|expected_fail, "detail", "error_type", "ms",
+     "description", "http_status", "hint"}
 
 Stages, in order (each capped by OUTERBOUNDS_PROBE_STAGE_TIMEOUT_SECONDS,
 default 20s, clamped to 5..30s):
@@ -110,6 +111,27 @@ STAGES = (
     ("list_runs", "List runs (read-only)"),
     ("trigger", "Trigger deployment"),
 )
+
+
+# Plain-language "what does this stage check" text, returned with every stage.
+STAGE_DESCRIPTIONS = {
+    "network": "Resolves DNS and opens TCP + TLS on port 443 to the Outerbounds API and metadata hosts.",
+    "packages": "Imports metaflow (ob-metaflow + Outerbounds extensions) in a child Python process; reports versions, "
+                "the metadata provider in use and which config keys are set (names only).",
+    "auth": "Checks the Outerbounds credential: fetches the remote Metaflow config with it or, with no credential, "
+            "pings the metadata service unauthenticated (401/403 expected).",
+    "list_runs": "Read-only: lists the 3 latest runs of the allowlisted flow through the Metaflow client.",
+    "trigger": "Triggers the allowlisted deployment. Off unless three explicit gates are set; never runs by default.",
+}
+DETAIL_LIMIT = 4000  # longer text is clipped with an explicit "[+N chars truncated]" marker
+
+
+def _clip(text: str, limit: int) -> str:
+    """Shorten *text* to *limit* chars, saying so (never silently)."""
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}… [+{len(text) - limit} chars truncated]"
 
 
 class ProbeNotAllowed(ValueError):
@@ -453,7 +475,7 @@ def _run_child(stage: str, payload: dict[str, Any], cfg: ProbeConfig, secrets: t
                 "error": f"could not start {interpreter.path} ({interpreter.source}): {type(exc).__name__}: {exc.strerror or exc}"}
     except OSError as exc:
         return {"ok": False, "error_type": "child_launch_failed",
-                "error": redact(f"could not start {interpreter.path} ({interpreter.source}): {type(exc).__name__}: {exc}", secrets)[:400]}
+                "error": _clip(redact(f"could not start {interpreter.path} ({interpreter.source}): {type(exc).__name__}: {exc}", secrets), 1000)}
     for line in reversed(completed.stdout.splitlines()):
         if line.startswith(_CHILD_MARKER):
             try:
@@ -464,7 +486,7 @@ def _run_child(stage: str, payload: dict[str, Any], cfg: ProbeConfig, secrets: t
     return {
         "ok": False,
         "error_type": "ChildProcessError",
-        "error": redact(f"exit {completed.returncode}: {' | '.join(tail)}", secrets)[:400],
+        "error": _clip(redact(f"exit {completed.returncode}: {' | '.join(tail)}", secrets), 1000),
     }
 
 
@@ -541,7 +563,7 @@ def child_main(request: dict[str, Any]) -> dict[str, Any]:
         else:
             result.update(error_type="ValueError", error=f"unknown stage {stage!r}")
     except BaseException as exc:  # noqa: BLE001 - reported to the parent
-        result.update(ok=False, error_type=_exc_type(exc), error=str(exc)[:500])
+        result.update(ok=False, error_type=_exc_type(exc), error=_clip(str(exc), 2000))
     return result
 
 
@@ -578,6 +600,7 @@ def stage_packages(cfg: ProbeConfig, ctx: dict[str, Any]) -> dict[str, Any]:
         return _stage("packages", "fail", f"metaflow import failed: {out.get('error', '')}; {keys_text}", out.get("error_type"), started)
     versions = ", ".join(f"{name}={version}" for name, version in (out.get("versions") or {}).items() if version)
     provider = str(out.get("metadata", "")).split("@")[0] or "?"
+    ctx["metadata_provider"] = provider
     detail = (f"metaflow {out.get('metaflow_version')} imported in {out.get('import_s')}s ({versions}); metadata provider: {provider}; "
               f"{keys_text}; python: {out.get('python') or '?'}")
     return _stage("packages", "pass", detail, None, started)
@@ -607,7 +630,7 @@ def stage_auth(cfg: ProbeConfig, ctx: dict[str, Any]) -> dict[str, Any]:
         status = "fail"
         return _stage("auth", status, f"request failed ({'credentials: ' + creds.source}): {exc}", _exc_type(exc), started)
     code = response.status_code
-    snippet = re.sub(r"\s+", " ", (response.text or "")[:160])
+    snippet = _clip(re.sub(r"\s+", " ", response.text or "").strip(), 300)
     if not creds.present:
         if code in (401, 403):
             return _stage("auth", "expected_fail", f"no Outerbounds credentials configured; {target} answered HTTP {code} as expected", f"HTTP{code}", started)
@@ -629,6 +652,7 @@ def stage_list_runs(cfg: ProbeConfig, ctx: dict[str, Any]) -> dict[str, Any]:
     flow = ctx["flow"]
     out = _run_child("list_runs", {"flow": flow, "timeout": cfg.stage_timeout}, cfg, ctx["secrets"])
     provider = str(out.get("metadata", "")).split("@")[0] or "unknown"
+    ctx["list_runs_provider"] = provider
     if out.get("ok"):
         runs = out.get("runs") or []
         listed = ", ".join(f"{item['id']} ({'done' if item['finished'] else 'running'}, {item['created_at']})" for item in runs) or "no runs"
@@ -659,6 +683,104 @@ def stage_trigger(cfg: ProbeConfig, ctx: dict[str, Any]) -> dict[str, Any]:
     if out.get("ok"):
         return _stage("trigger", "pass", f"triggered allowlisted deployment: {out.get('triggered')}", None, started)
     return _stage("trigger", "fail", f"trigger failed: {out.get('error', '')}", out.get("error_type"), started)
+
+
+# --- hints: what a stage result means and what to do next --------------------------------
+
+_CREDENTIAL_HINT = ("needs a service-principal credential (METAFLOW_SERVICE_AUTH_KEY / OBP_METAFLOW_CONFIG_URL) "
+                    "from the Outerbounds owner, bound to the app as a secret")
+_INTERPRETER_HINT = ("The child Python interpreter could not be started. Set OUTERBOUNDS_PROBE_PYTHON to an absolute, "
+                     "executable python that has backend/requirements.txt installed (normally unset: the API's own "
+                     "Python is used).")
+_TIMEOUT_HINT = ("The stage hit its time limit and the child was killed. Raise OUTERBOUNDS_PROBE_STAGE_TIMEOUT_SECONDS "
+                 "(max 30) or check reachability of the Outerbounds API (network stage).")
+
+
+def _http_status(stage: dict[str, Any]) -> int | None:
+    match = re.fullmatch(r"HTTP(\d{3})", stage.get("error_type") or "")
+    if not match and stage["id"] == "auth":
+        match = re.search(r"\bHTTP (\d{3})\b", stage.get("detail") or "")
+    return int(match.group(1)) if match else None
+
+
+def stage_hint(stage: dict[str, Any], ctx: dict[str, Any]) -> str:
+    """One or two sentences: what the result means and the next step."""
+    sid, status, err = stage["id"], stage["status"], stage.get("error_type") or ""
+    code = stage.get("http_status")
+    has_creds = bool(getattr(ctx.get("credentials"), "present", False))
+    if err in ("interpreter_missing", "child_launch_failed"):
+        return _INTERPRETER_HINT
+    if err == "TimeoutError":
+        return _TIMEOUT_HINT
+    if sid == "network":
+        if status == "pass":
+            return "Outbound DNS, TCP and TLS to Outerbounds work from this host."
+        if "gaierror" in err:
+            return ("DNS lookup failed: this host cannot resolve the Outerbounds hostnames. Check DNS / egress "
+                    "(Databricks Apps network policy, VPN or proxy).")
+        if "SSL" in err or "Certificate" in err:
+            return ("TLS handshake failed: a proxy may be intercepting TLS or the CA bundle is missing. "
+                    "Check egress / proxy settings.")
+        return ("TCP/TLS connection to port 443 failed or timed out: egress to Outerbounds is blocked. "
+                "Allowlist the api./metadata. hosts in the egress / firewall rules.")
+    if sid == "packages":
+        if status == "pass":
+            if ctx.get("metadata_provider") == "local":
+                return ("Metaflow imports fine, but it is using local metadata because no Outerbounds config or "
+                        "credential was found (see auth).")
+            return "Metaflow and the Outerbounds extension import correctly and use the Outerbounds metadata service."
+        if err.endswith(("ModuleNotFoundError", "ImportError")):
+            return ("metaflow is not installed for the child interpreter. Install backend/requirements.txt "
+                    "(ob-metaflow, ob-metaflow-extensions) into that environment.")
+        return ("Importing metaflow failed. This is usually a bad Outerbounds config (METAFLOW_HOME / config.json) "
+                "or an unreachable remote config; see the exception.")
+    if sid == "auth":
+        if status == "expected_fail":
+            return (f"No Outerbounds credential configured: the service refused an anonymous request (HTTP {code}). "
+                    f"This {_CREDENTIAL_HINT}.")
+        if status == "pass":
+            if has_creds:
+                return "The configured Outerbounds credential was accepted."
+            return "The endpoint answered without a credential, which is unexpected. Confirm the domain and perimeter."
+        if code in (401, 403):
+            return ("The configured credential was rejected (expired, revoked or for another perimeter). "
+                    "Ask the Outerbounds owner for a new service-principal key.")
+        if code == 404:
+            return "Config URL or perimeter not found. Check OBP_METAFLOW_CONFIG_URL and OUTERBOUNDS_PERIMETER."
+        if code and code >= 500:
+            return "Outerbounds returned a server error. Retry later or contact the Outerbounds owner."
+        return "The HTTP request itself failed (network / TLS). Compare with the network stage."
+    if sid == "list_runs":
+        provider = ctx.get("list_runs_provider")
+        if status == "pass":
+            return "Read access to this flow's runs works with the current credential."
+        if status == "expected_fail":
+            if err.endswith("MetaflowNotFound") and provider == "local":
+                return ("No credential, so Metaflow fell back to local metadata, where this flow does not exist. "
+                        f"Once auth passes this should list real runs; it {_CREDENTIAL_HINT}.")
+            return f"Expected without a credential; it {_CREDENTIAL_HINT}."
+        if err.endswith("MetaflowNotFound") and provider == "local":
+            return ("A credential was found but Metaflow still used local metadata, so the Outerbounds config was not "
+                    "applied in the child. Check METAFLOW_HOME / OBP_METAFLOW_CONFIG_URL.")
+        if err.endswith("MetaflowNotFound"):
+            return ("Authenticated, but the flow is not visible: check the flow name, OUTERBOUNDS_PERIMETER and that "
+                    "the service principal can read this flow.")
+        return "Listing runs failed; see the exception and compare with the auth stage."
+    if sid == "trigger":
+        if status == "skip":
+            return ("Not run, by design. It needs OUTERBOUNDS_PROBE_TRIGGER_ENABLED=1, include_trigger in the request "
+                    "and an allowlisted OUTERBOUNDS_PROBE_DEPLOYMENT_ID. Nothing was triggered.")
+        if status == "pass":
+            return "The allowlisted deployment was triggered, which started a real run."
+        return "Triggering the allowlisted deployment failed; see the exception."
+    return ""
+
+
+def _annotate(stage: dict[str, Any], ctx: dict[str, Any]) -> None:
+    """Add the UI-facing fields: description, http_status and hint."""
+    stage["description"] = STAGE_DESCRIPTIONS.get(stage["id"], "")
+    stage["http_status"] = _http_status(stage)
+    stage["hint"] = stage_hint(stage, ctx) or None
 
 
 STAGE_FUNCS = {
@@ -717,7 +839,8 @@ def run_probe(flow: str | None = None, include_trigger: bool = False, deployment
                 result = STAGE_FUNCS[stage_id](cfg, ctx)
             except Exception as exc:  # noqa: BLE001 - a stage bug must not abort the probe
                 result = _stage(stage_id, "fail", f"probe error: {exc}", _exc_type(exc), stage_started)
-            result["detail"] = redact(result["detail"], secrets)[:900]
+            result["detail"] = _clip(redact(result["detail"], secrets), DETAIL_LIMIT)
+            _annotate(result, ctx)
             stages.append(result)
             level = logging.WARNING if result["status"] == "fail" else logging.INFO
             _log(level, f"stage {index} {stage_id}: {result['status']} ({result['ms']} ms)"

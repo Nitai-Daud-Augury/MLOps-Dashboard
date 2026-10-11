@@ -23,7 +23,8 @@ def test_databricks_app_manifest_uses_safe_same_origin_runtime():
     assert manifest["command"] == ["python", "run.py"]
     environment = {item["name"]: item for item in manifest["env"]}
     assert environment["MLOPS_DASHBOARD_RUNTIME"]["value"] == "databricks"
-    assert environment["BACKFILL_DISPATCH_ENABLED"]["value"] == "0"
+    # Dispatch on (campaign adapter refuses on Databricks); production mode is inert and stays "0".
+    assert environment["BACKFILL_DISPATCH_ENABLED"]["value"] == "1"
     assert environment["BACKFILL_PRODUCTION_MODE"]["value"] == "0"
     assert environment["ULRPM_MACHINE_IDS_FILE"]["value"] == "data/unique_machine_ids.txt"
     assert environment["LIFECYCLE_SOURCE"]["value"] == "databricks"
@@ -47,6 +48,10 @@ def test_databricks_app_manifest_uses_safe_same_origin_runtime():
     assert environment["OUTERBOUNDS_DEPLOYMENT_DOMAIN"]["value"] == "augury.obp.outerbounds.com"
     assert "OUTERBOUNDS_PROBE_DEPLOYMENT_ID" not in environment
     assert not any(key in environment for key in ("METAFLOW_SERVICE_AUTH_KEY", "OBP_METAFLOW_CONFIG_URL", "METAFLOW_SERVICE_HEADERS"))
+    # The Outerbounds SP is documented but not bound yet (the secret does not exist; deploy would fail),
+    # so admin actions answer 503 until it is. Deployment ids arrive together with the SP.
+    assert not any(key.startswith("OUTERBOUNDS_") and key.endswith("_DEPLOYMENT_ID") for key in environment)
+    assert "OUTERBOUNDS_TERMINATE_AUTHORIZE_TOKEN" not in environment
     assert environment["DATABRICKS_FEATURE_STORE_TABLE"]["value"] == "dih_prod.silver_mh.feature_store"
     assert environment["DATABRICKS_FEATURE_STORE_BRONZE_TABLE"]["value"] == "dih_prod.bronze_augury_mh_blob.feature_store"
     for key in ("LIFECYCLE_DATABRICKS_TIMEOUT_SECONDS", "LIFECYCLE_DATABRICKS_COLD_TIMEOUT_SECONDS", "BACKFILL_SCAN_WORKERS",
@@ -88,6 +93,8 @@ def test_databricks_bundle_names_sources_targets_and_secret_binding_are_safe():
         }},
     ]
     assert {"mongodb_secret_scope", "mongodb_secret_key"} <= set(bundle["variables"])
+    # No Outerbounds SP secret binding until the secret exists (runbook 4e has the snippet).
+    assert not any(word in item["name"] for item in app["resources"] for word in ("outerbounds", "metaflow"))
     serialized = (DASHBOARD_ROOT / "databricks.yml").read_text(encoding="utf-8") + (DASHBOARD_ROOT / "resources" / "mlops_dashboard.app.yml").read_text(encoding="utf-8")
     assert not re.search(r"https?://|/Users/(?!\$\{workspace\.current_user\.userName\})[^\s/]+/|[0-9a-f]{24}|password\s*:\s*\S+|token\s*:\s*\S+", serialized, re.I)
 

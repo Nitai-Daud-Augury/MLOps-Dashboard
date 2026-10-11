@@ -9,7 +9,9 @@ import json
 import logging
 import os
 import socket
+import re
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +19,8 @@ import pytest
 from backfill_dashboard import outerbounds_probe as probe
 from test_runtime_mode import _request
 
+STAGE_KEYS = {"id", "name", "status", "detail", "error_type", "ms", "description", "http_status", "hint"}
+REPO_ROOT = Path(__file__).resolve().parents[2]
 TOKEN = "obp-test-token-0123456789abcdef"
 CONFIG_URL = "https://api.augury.obp.outerbounds.com/v1/perimeters/default/abcdefghijklmnop0123/default"
 
@@ -122,7 +126,8 @@ def test_api_run_returns_stage_table(monkeypatch):
     response = _request(app_module.app, "POST", "/api/diagnostics/outerbounds", {})
     assert response.status_code == 200
     assert [stage["id"] for stage in response.body["stages"]] == ["network", "packages", "auth", "list_runs", "trigger"]
-    assert set(response.body["stages"][0]) == {"id", "name", "status", "detail", "error_type", "ms"}
+    for stage in response.body["stages"]:
+        assert set(stage) == STAGE_KEYS
     assert response.body["overall"] == "expected_fail"
     status = _request(app_module.app, "GET", "/api/diagnostics/outerbounds/status").body
     assert status["last_result"]["probe_id"] == response.body["probe_id"]
@@ -463,4 +468,113 @@ def test_relative_metaflow_home_is_absolute_in_child_env(monkeypatch, tmp_path):
     env = probe._child_env(probe.ProbeConfig.from_env())
     assert env["METAFLOW_HOME"] == str(tmp_path / "mfconfig")
     assert probe._metaflow_home() == tmp_path / "mfconfig"
+
+
+# --- UI contract: fields, descriptions, hints ------------------------------------------
+
+def _ts_interface_fields(name):
+    source = (REPO_ROOT / "src" / "components" / "outerbounds-probe" / "probeApi.ts").read_text(encoding="utf-8")
+    body = re.search(r"export interface " + name + r" \{(.*?)\n\}", source, re.S).group(1)
+    return set(re.findall(r"^\s*([a-z_]+)\??:", body, re.M))
+
+
+def test_stage_schema_matches_frontend_types(monkeypatch):
+    _ok_network(monkeypatch)
+    monkeypatch.setattr(probe, "_run_child", Child())
+    monkeypatch.setattr(probe, "_http_get", _http(403))
+    result = probe.run_probe()
+    for stage in result["stages"]:
+        assert set(stage) == STAGE_KEYS
+    assert _ts_interface_fields("ProbeStage") == STAGE_KEYS
+    assert set(result["counts"]) == _ts_interface_fields("ProbeCounts")
+    assert {"probe_id", "started_at", "finished_at", "ms", "overall", "flow", "counts", "stages"} <= _ts_interface_fields("ProbeResult")
+    assert _ts_interface_fields("ProbeResult") <= set(result)
+
+
+def test_every_stage_has_a_description():
+    assert set(probe.STAGE_DESCRIPTIONS) == {stage_id for stage_id, _ in probe.STAGES}
+    assert all(len(text) > 20 for text in probe.STAGE_DESCRIPTIONS.values())
+
+
+def test_hints_for_the_no_credential_dev_case(monkeypatch):
+    """The deployed dev app today: network/packages pass, auth 403, list_runs local MetaflowNotFound, trigger skip."""
+    _ok_network(monkeypatch)
+    monkeypatch.setattr(probe, "_run_child", Child(list_runs={
+        "ok": False, "metadata": "local@/tmp", "error_type": "metaflow.exception.MetaflowNotFound",
+        "error": "Flow('FSTBackfill') does not exist"}))
+    monkeypatch.setattr(probe, "_http_get", _http(403, "<html>403 Forbidden</html>"))
+    stages = _by_id(probe.run_probe())
+
+    assert stages["network"]["hint"].startswith("Outbound DNS, TCP and TLS")
+    assert "local metadata" in stages["packages"]["hint"]
+    auth = stages["auth"]
+    assert auth["status"] == "expected_fail" and auth["error_type"] == "HTTP403" and auth["http_status"] == 403
+    assert "No Outerbounds credential configured" in auth["hint"]
+    assert "METAFLOW_SERVICE_AUTH_KEY / OBP_METAFLOW_CONFIG_URL" in auth["hint"] and "Outerbounds owner" in auth["hint"]
+    runs = stages["list_runs"]
+    assert runs["status"] == "expected_fail" and runs["http_status"] is None
+    assert "fell back to local metadata" in runs["hint"]
+    assert "Nothing was triggered" in stages["trigger"]["hint"]
+    assert all(stage["description"] == probe.STAGE_DESCRIPTIONS[stage["id"]] for stage in stages.values())
+
+
+def test_auth_pass_reports_http_200(monkeypatch, tmp_path):
+    _with_token(monkeypatch, tmp_path)
+    _ok_network(monkeypatch)
+    monkeypatch.setattr(probe, "_run_child", Child())
+    monkeypatch.setattr(probe, "_http_get", _http(200, json_body={"config": {}}))
+    auth = _by_id(probe.run_probe())["auth"]
+    assert auth["status"] == "pass" and auth["http_status"] == 200 and auth["error_type"] is None
+    assert auth["hint"] == "The configured Outerbounds credential was accepted."
+
+
+def test_rejected_credential_hint(monkeypatch, tmp_path):
+    _with_token(monkeypatch, tmp_path)
+    _ok_network(monkeypatch)
+    monkeypatch.setattr(probe, "_run_child", Child())
+    monkeypatch.setattr(probe, "_http_get", _http(401, "denied"))
+    auth = _by_id(probe.run_probe())["auth"]
+    assert auth["status"] == "fail" and auth["http_status"] == 401 and "rejected" in auth["hint"]
+
+
+def test_dns_failure_hint(monkeypatch):
+    def fail(host, timeout):
+        raise socket.gaierror(8, "nodename nor servname provided")
+
+    monkeypatch.setattr(probe, "_check_host", fail)
+    monkeypatch.setattr(probe, "_run_child", Child())
+    monkeypatch.setattr(probe, "_http_get", _http(403))
+    network = _by_id(probe.run_probe())["network"]
+    assert network["status"] == "fail" and network["error_type"] == "socket.gaierror"
+    assert "DNS" in network["hint"] and "egress" in network["hint"]
+
+
+def test_interpreter_missing_hint_names_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUTERBOUNDS_PROBE_PYTHON", str(tmp_path / "missing"))
+    _ok_network(monkeypatch)
+    monkeypatch.setattr(probe, "_http_get", _http(403))
+    stages = _by_id(probe.run_probe())
+    for stage_id in ("packages", "list_runs"):
+        assert stages[stage_id]["error_type"] == "interpreter_missing"
+        assert "OUTERBOUNDS_PROBE_PYTHON" in stages[stage_id]["hint"]
+
+
+def test_missing_metaflow_hint(monkeypatch):
+    _ok_network(monkeypatch)
+    monkeypatch.setattr(probe, "_run_child", Child(packages={"ok": False, "error_type": "ModuleNotFoundError", "error": "No module named 'metaflow'"}))
+    monkeypatch.setattr(probe, "_http_get", _http(403))
+    packages = _by_id(probe.run_probe())["packages"]
+    assert packages["status"] == "fail" and "requirements.txt" in packages["hint"]
+
+
+def test_long_detail_is_never_silently_truncated(monkeypatch):
+    _ok_network(monkeypatch)
+    long_error = "x" * 1500
+    monkeypatch.setattr(probe, "_run_child", Child(list_runs={"ok": False, "metadata": "local@/x", "error_type": "RuntimeError", "error": long_error}))
+    monkeypatch.setattr(probe, "_http_get", _http(403))
+    runs = _by_id(probe.run_probe())["list_runs"]
+    assert long_error in runs["detail"]  # 1500 chars fit: kept in full
+    assert "truncated" not in runs["detail"]
+    clipped = probe._clip("y" * (probe.DETAIL_LIMIT + 25), probe.DETAIL_LIMIT)
+    assert clipped.endswith("[+25 chars truncated]")
 

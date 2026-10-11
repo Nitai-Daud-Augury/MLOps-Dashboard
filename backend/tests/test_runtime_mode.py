@@ -60,54 +60,102 @@ def test_invalid_runtime_mode_fails_clearly():
         resolve_runtime({"MLOPS_DASHBOARD_RUNTIME": " "})
 
 
-@pytest.mark.parametrize("mode,enabled", [("local", True), ("docker", False), ("databricks", False)])
-def test_runtime_capabilities_are_safe_and_workflow_gated(mode, enabled):
-    info = runtime_info({"MLOPS_DASHBOARD_RUNTIME": mode}).as_dict()
-    assert info == {
-        "mode": mode,
-        "capabilities": {"monitor": True, "workflow_mutations": enabled, "manifest_creation": True},
-    }
-    assert "secret" not in repr(info).lower()
+SP_CREDS = {"METAFLOW_SERVICE_AUTH_KEY": "sp-key-not-real-123456", "OBP_METAFLOW_CONFIG_URL": "https://api.example.invalid/c"}
 
 
-def test_nonlocal_workflow_routes_reject_before_side_effects(monkeypatch):
+@pytest.mark.parametrize("environ,enabled,backend,error_type", [
+    ({"MLOPS_DASHBOARD_RUNTIME": "local"}, True, "argo_cli", None),
+    ({"MLOPS_DASHBOARD_RUNTIME": "docker"}, False, None, "runtime_without_workflow_backend"),
+    ({"MLOPS_DASHBOARD_RUNTIME": "databricks"}, False, "metaflow", "outerbounds_sp_not_configured"),
+    ({"MLOPS_DASHBOARD_RUNTIME": "databricks", **SP_CREDS}, True, "metaflow", None),
+    # Inferred Databricks Apps runtime behaves the same.
+    ({"DATABRICKS_APP_PORT": "8000", **SP_CREDS}, True, "metaflow", None),
+])
+def test_runtime_capabilities_are_safe_and_workflow_gated(environ, enabled, backend, error_type):
+    info = runtime_info(environ).as_dict()
+    assert info["capabilities"] == {"monitor": True, "workflow_mutations": enabled, "manifest_creation": True}
+    assert info["workflow_backend"] == backend
+    assert info["workflow_mutations_error_type"] == error_type
+    assert (info["workflow_mutations_error"] is None) == enabled
+    assert "sp-key-not-real" not in repr(info) and "example.invalid" not in repr(info)
+
+
+@pytest.mark.parametrize("missing", ["METAFLOW_SERVICE_AUTH_KEY", "OBP_METAFLOW_CONFIG_URL"])
+def test_databricks_needs_both_sp_keys_and_names_the_missing_one(missing):
+    environ = {"MLOPS_DASHBOARD_RUNTIME": "databricks", **SP_CREDS, missing: "  "}
+    info = runtime_info(environ)
+    assert info.workflow_mutations is False and info.workflow_mutations_status_code == 503
+    assert info.workflow_mutations_error.startswith(
+        "Outerbounds service principal not configured: set METAFLOW_SERVICE_AUTH_KEY and OBP_METAFLOW_CONFIG_URL"
+    )
+    assert f"missing: {missing}" in info.workflow_mutations_error
+
+
+_MUTATION_ROUTES = [
+    "/api/admin/workflows/preflight",
+    "/api/admin/workflows/create",
+    "/api/admin/workflows/trigger",
+    "/api/admin/backfills/all",
+    "/api/admin/backfills/orchestrated",
+    "/api/admin/actions/action-a/cancel-before-submit",
+    "/api/admin/fullrlbl/trigger",
+    "/api/admin/workflows/terminate",
+    "/api/admin/logs",
+    "/api/machines/machine-a/backfills/202608/cancel",
+    "/api/v1/backfill-campaigns",
+    "/api/v1/backfill-campaigns/campaign-a/actions",
+    "/api/v1/backfill-campaigns/campaign-a/items/item-a/actions",
+    "/api/v1/backfill-campaigns/campaign-a/machines/machine-a/actions",
+]
+
+
+@pytest.mark.parametrize("environ,status,error_type", [
+    ({"MLOPS_DASHBOARD_RUNTIME": "databricks"}, 503, "outerbounds_sp_not_configured"),
+    ({"MLOPS_DASHBOARD_RUNTIME": "docker"}, 403, "runtime_without_workflow_backend"),
+])
+def test_unavailable_workflow_routes_reject_before_side_effects(monkeypatch, environ, status, error_type):
     from backfill_dashboard import app as app_module
 
-    monkeypatch.setattr(app_module, "RUNTIME_INFO", runtime_info({"MLOPS_DASHBOARD_RUNTIME": "databricks"}))
+    monkeypatch.setattr(app_module, "RUNTIME_INFO", runtime_info(environ))
     def unexpected(*_args, **_kwargs):
         raise AssertionError("blocked route reached a side-effecting handler")
 
     monkeypatch.setattr(app_module.admin_repository, "create", unexpected)
     monkeypatch.setattr(app_module.command_builder, "build_trigger", unexpected)
     health = _request(app_module.app, "GET", "/api/health")
-    assert health.status_code == 200 and health.body["runtime"]["mode"] == "databricks"
+    assert health.status_code == 200 and health.body["runtime"]["mode"] == environ["MLOPS_DASHBOARD_RUNTIME"]
     public_spec = _request(app_module.app, "GET", "/api/admin/spec").body
     assert public_spec["runtime"]["capabilities"]["workflow_mutations"] is False
+    assert public_spec["runtime"]["workflow_mutations_error_type"] == error_type
     assert "profile" not in public_spec["runtime"]
     assert not app_module._workflow_mutation_route("POST", "/api/admin/manifests/orchestrated")
 
     # Invalid/empty payloads prove the runtime middleware runs before request
     # validation and before action creation, reservations, or subprocess calls.
-    blocked = [
-        "/api/admin/workflows/preflight",
-        "/api/admin/workflows/create",
-        "/api/admin/workflows/trigger",
-        "/api/admin/backfills/all",
-        "/api/admin/backfills/orchestrated",
-        "/api/admin/actions/action-a/cancel-before-submit",
-        "/api/admin/fullrlbl/trigger",
-        "/api/admin/workflows/terminate",
-        "/api/admin/logs",
-        "/api/machines/machine-a/backfills/202608/cancel",
-        "/api/v1/backfill-campaigns",
-        "/api/v1/backfill-campaigns/campaign-a/actions",
-        "/api/v1/backfill-campaigns/campaign-a/items/item-a/actions",
-        "/api/v1/backfill-campaigns/campaign-a/machines/machine-a/actions",
-    ]
-    for path in blocked:
+    for path in _MUTATION_ROUTES:
         response = _request(app_module.app, "POST", path, {})
-        assert response.status_code == 403, (path, response.body)
-        assert "monitor-only" in response.body["detail"].lower()
+        assert response.status_code == status, (path, response.body)
+        assert response.body["error_type"] == error_type
+        assert "monitor-only" not in response.body["detail"].lower()
+
+
+def test_local_runtime_never_gates_workflow_routes(monkeypatch):
+    from backfill_dashboard import app as app_module
+
+    monkeypatch.setattr(app_module, "RUNTIME_INFO", runtime_info({"MLOPS_DASHBOARD_RUNTIME": "local"}))
+    response = _request(app_module.app, "POST", "/api/admin/workflows/terminate", {"params": {"workflow_id": 5}})
+    assert response.status_code in {400, 422}, response.body  # reached validation, not a runtime gate
+
+
+def test_ui_has_no_monitor_only_banners_or_pre_disabled_admin_buttons():
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "src"
+    text = "\n".join(path.read_text(encoding="utf-8") for path in src.rglob("*.tsx"))
+    for phrase in ("Monitor-only mode", "monitor-only runtime", "disabled in monitor-only", "runtime-mode-notice"):
+        assert phrase not in text, phrase
+    assert "disabled={!workflowMutationsEnabled" not in text
+    assert "disabled={!mutationsEnabled" not in text
 
 
 def test_nonlocal_readiness_and_workflow_status_never_use_local_cli(monkeypatch):

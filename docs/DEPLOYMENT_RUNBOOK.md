@@ -8,13 +8,19 @@ start a shared app until those owners approve the target workspace and costs.
 ## Current deployment contract
 
 - App names are `mlops-dashboard-dev` and `mlops-dashboard` (prod).
-- The app is monitor-only in Docker and Databricks. Local Argo/Metaflow mutation APIs return 403
-  in deployed modes; UI controls are disabled too. Scanning reads FST; lifecycle enrichment is
+- Admin workflow actions (trigger, stop, logs, cancel/requeue) run locally through the argo/kubectl
+  CLIs and on Databricks Apps through the Metaflow client (`backend/backfill_dashboard/outerbounds_actions.py`),
+  enabled once the Outerbounds service principal is configured (section 4e). Without it the buttons
+  stay enabled and every action answers **HTTP 503** "Outerbounds service principal not configured:
+  set METAFLOW_SERVICE_AUTH_KEY and OBP_METAFLOW_CONFIG_URL ...". Docker has no workflow backend
+  (403). Scanning reads FST; lifecycle enrichment is
   selected by `LIFECYCLE_SOURCE` (`databricks` in the deployed app manifest, `mongo` by default
   locally when unset). Databricks uses bronze `dih_prod.bronze_augury_mh_mongodb.machines_raw`
   (latest `ingestion_timestamp` per `_id`) via the bound SQL warehouse. Lookup remains fail-open.
-- `BACKFILL_DISPATCH_ENABLED=0` and `BACKFILL_PRODUCTION_MODE=0` are set in the Databricks app
-  manifest. No remote workflow trigger adapter is implemented.
+- `BACKFILL_DISPATCH_ENABLED=1` and `BACKFILL_PRODUCTION_MODE=0` are set in the Databricks app
+  manifest (shared by the `dev` and `prod` targets). Dispatch=1 starts the campaign dispatcher when
+  workflow actions are available; on Databricks its adapter refuses campaign submissions (see 4e).
+  `BACKFILL_PRODUCTION_MODE` is inert (read into `Settings.production_mode`, used by no code path).
 - The Bundle app resource is `mlops_dashboard`. It binds Databricks secret resources for
   `MONGODB_URL` and `FST_PROD_ACCOUNT_KEY` (`READ`), plus SQL warehouse `sql-warehouse`
   (`6ed9ddd0b2661edc`, `CAN_USE`) injected as `DATABRICKS_WAREHOUSE_ID`. Manifest-write
@@ -22,8 +28,10 @@ start a shared app until those owners approve the target workspace and costs.
 - The Bundle derives its workspace root from the authenticated caller. For prod, deployments must
   run as the approved deployment service principal; no user, workspace host, or principal is
   hardcoded in the repository.
-- App state and campaign/control-plane JSON/SQLite files use ephemeral local storage in the current
-  package. Do not enable workflow dispatch or treat these files as durable production state.
+- Admin action history (`/tmp/ulrpm_backfill_admin_actions.json`), workflow reviews and the campaign
+  control-plane SQLite (`/tmp/backfill_control_plane.sqlite3`) are ephemeral on Apps (lost on
+  restart/redeploy). Per-month machine locks live in the control store, which defaults to Azure blob
+  (`BACKFILL_CONTROL_STORE=azure_blob`) and survives restarts. See 4e, "State durability".
 
 ## One-time GitHub and Databricks setup
 
@@ -313,6 +321,82 @@ PYTHONPATH="$PWD/backend" python -m backfill_dashboard.outerbounds_probe --flow 
 `app.yaml` sets the probe ON with trigger OFF. The `prod` target deploys the same `app.yaml`,
 so production gets the probe too unless it is turned off there.
 
+### 4e. Outerbounds service principal (admin actions on Databricks)
+
+On Databricks Apps (`MLOPS_DASHBOARD_RUNTIME=databricks`) the admin actions use the Metaflow
+client in a short-lived child process (same interpreter/isolation approach as the probe, 4d):
+
+| Action | Databricks (Metaflow client) | Local (unchanged) |
+|---|---|---|
+| Trigger FSTBackfill / ULRPM orchestrator / FullRlbl test | `DeployedFlow.from_deployment(<deployment id>).trigger(**params)`; parameters are derived from the exact `argo submit -p` list the local builder makes | `argo submit --from workflowtemplate/...` |
+| Live status / Running / Overview | `Flow(<flow>).runs()` + per-run Argo phase via the Metaflow Argo client (falls back to the Metaflow run state) | `argo list` / `argo get` |
+| Stop a run | `DeployedFlow.get_triggered_run(<deployment id>, "argo-<id>").terminate()` | `argo terminate` |
+| Stop all runs in a namespace | not supported (501) | `bx_scripts.argo_handler` |
+| Fetch logs | `Task(<flow>/<run>/<step>/<task>).stdout/stderr` | `argo logs` / `flow.py logs` |
+| Create workflow (`argo-workflows create`) | not supported (501): deploy from a workstation | flow CLI |
+| Campaign dispatch | refused permanently (no idempotent workflow name in the trigger API) | argo CLI adapter |
+
+The cancel window, the one-pending-trigger guard, per-machine month reservations and the
+sequential-window checks are the same code on both paths; the ULRPM parent still gets
+`child_max_parallel_steps=1`, so same-machine chunks run strictly one after another.
+
+Errors: missing SP -> 503 (`outerbounds_sp_not_configured`), missing deployment id -> 503
+(`deployment_not_configured`), unsupported operation -> 501, Metaflow not found -> 404, run/flow
+mismatch -> 409, bad parameters -> 422, timeout -> 504, other Metaflow/Outerbounds failures
+(including a rejected SP) -> 502. Failures inside a queued action are recorded on the action
+(`error` = exception type + message) and shown as the action result.
+
+**Once the SP exists (owner checklist):**
+
+1. Create the secrets in the dashboard scope (same scope as Mongo, `mlops-dashboard`), with the
+   workspace secret UI or an interactive CLI prompt, never a command-line value:
+   - key `outerbounds_sp_auth_key` = the SP's Metaflow service auth key (`METAFLOW_SERVICE_AUTH_KEY`)
+   - key `outerbounds_sp_config_url` = the perimeter config URL (`OBP_METAFLOW_CONFIG_URL`)
+2. Bind them in `resources/mlops_dashboard.app.yml` under `resources:`:
+
+   ```yaml
+        - name: outerbounds_sp_auth_key
+          secret:
+            scope: ${var.mongodb_secret_scope}
+            key: outerbounds_sp_auth_key
+            permission: READ
+        - name: outerbounds_sp_config_url
+          secret:
+            scope: ${var.mongodb_secret_scope}
+            key: outerbounds_sp_config_url
+            permission: READ
+   ```
+
+3. Uncomment the block in `app.yaml` (env `METAFLOW_SERVICE_AUTH_KEY` / `OBP_METAFLOW_CONFIG_URL`
+   with `valueFrom`) and set the deployment ids (Argo WorkflowTemplate names, i.e. what
+   `argo-workflows create` printed / `argo template list` shows):
+   `OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID`, `OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID`,
+   `OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID`. Prod shares `app.yaml`: if prod must point at
+   different deployments, give the prod target its own values before deploying it.
+4. Outerbounds side (owner): the SP needs, in perimeter `default`, read on the metadata service
+   (runs/tasks/logs), read on the deployed workflow templates and workflows, and permission to
+   create (trigger) and terminate workflows from those templates. `terminate` runs Metaflow's
+   production-token check: if the deployment was created by another user, set the optional
+   secret `OUTERBOUNDS_TERMINATE_AUTHORIZE_TOKEN` (that deployment's production token) or stop
+   runs from the Outerbounds UI.
+5. Databricks side: the app service principal needs `READ` on the scope (the resource binding
+   grants it on deploy); egress to `api.` / `metadata.augury.obp.outerbounds.com:443`.
+6. Deploy dev, then verify: `GET /api/health` shows `workflow_mutations: true`,
+   `workflow_backend: "metaflow"`; Admin > Outerbounds probe shows network/packages/auth/list_runs
+   **pass** (auth HTTP 200); Admin overview readiness shows the SP configured and the ULRPM
+   contract; Live Operations lists recent runs. Only then trigger one dev backfill for one test
+   machine and stop it from the dashboard. Keep `OUTERBOUNDS_PROBE_TRIGGER_ENABLED=0`.
+
+**State durability.** Month reservations (the duplicate/sequential guard) are in the control store
+(Azure blob by default) and survive restarts. The admin action history, the "one pending trigger"
+guard and the campaign SQLite are in `/tmp` and are lost on restart; a restart between a trigger
+submission and the reservation being linked to the workflow id can release that reservation.
+Proposal (not implemented): move the action/campaign state to Lakebase (managed Postgres, an
+App resource with transactions and row locks; best fit for locks) - alternatives are a Delta table
+through the bound SQL warehouse (`BACKFILL_CONTROL_STORE=databricks` already exists for the month
+store; seconds of latency, no row locks) or Azure blob JSON with ETags (what the month store
+uses; simple, coarse-grained). A UC Volume is not suitable for SQLite (no POSIX locking from Apps).
+
 ## 4. Provision FST access and network reachability
 
 This is a required external setup item before expecting a Databricks deployment to complete an
@@ -407,8 +491,8 @@ Commands and option forms were checked against installed Databricks CLI help.
   set an approved short auto-stop. See [SQL warehouse settings](https://docs.databricks.com/aws/en/compute/sql-warehouse/create).
 - Do not use `databricks bundle destroy` for routine cost control. It deletes resources rather
   than stopping compute.
-- The current app's `/tmp` SQLite/JSON state is disposable. Do not persist or schedule backfill
-  campaigns against it. A durable control-plane store is a separate future requirement.
+- The current app's `/tmp` SQLite/JSON state is disposable (campaign dispatch is refused on
+  Databricks). A durable control-plane store is a separate requirement (4e, "State durability").
 
 ## Post-deployment verification
 
@@ -416,8 +500,9 @@ After app start, get its URL and state in the workspace app page or with `databr
 Check logs for startup errors, missing resource variables, Azure credential/network failures, or
 Mongo connection errors. Then verify:
 
-1. `GET /api/health` returns `ok: true` and runtime capabilities with `monitor: true` and
-   `workflow_mutations: false`.
+1. `GET /api/health` returns `ok: true` and runtime capabilities with `monitor: true`;
+   `workflow_mutations` is `false` with `workflow_mutations_error_type: outerbounds_sp_not_configured`
+   until the SP is bound, then `true` (`workflow_backend: metaflow`).
 2. `/` and a React deep link such as `/machine/<machine-id>` both render the app.
 3. An unknown path such as `/api/not-a-route` returns JSON 404, not SPA HTML.
 4. `POST /api/backfill/scan` starts a read-only scan; poll `GET /api/backfill/status` until
@@ -437,8 +522,8 @@ Mongo connection errors. Then verify:
    bronze `created_at` values (not Mongo endpoint `installation_date`). Until lifecycle is healthy,
    the scanner continues fail-open and installation boundaries may be unknown; do not sign
    off on those dates.
-8. Confirm workflow capability is disabled in `/api/admin/spec` and UI. No Argo/Metaflow trigger,
-   cancel, stop, or requeue is supported in deployed mode.
+8. Without the SP, confirm an admin action (e.g. Stop) shows the 503 "Outerbounds service principal
+   not configured" result. With the SP, follow 4e step 6.
 
 Example read-only requests (run only against the chosen deployment):
 
@@ -478,7 +563,7 @@ not performed as part of this code change.
 2. Identify the last known-good commit from the protected release history. Revert the faulty
    change through a reviewed pull request; do not force-push `main`.
 3. Merge the revert after CI passes. The main workflow updates dev and stops it by default.
-4. Verify dev health, lifecycle/Mongo status, deep links and monitor-only capability before any
+4. Verify dev health, lifecycle/Mongo status, deep links and the workflow capability (4e) before any
    manual prod deployment. Use the prod approval gate and keep-running unchecked unless explicitly
    needed.
 5. If only runtime compute is the concern, use app-control `stop`; do not destroy Bundle resources.
@@ -494,13 +579,15 @@ approval, and app/warehouse cost monitoring. Release checklist:
 - [ ] Dedicated Mongo scope/key is present and app resource has read-only scope permission.
 - [ ] FST Azure read access and network egress are provisioned and live scan verified.
 - [ ] App state reports `RUNNING` during use and is `STOPPED` afterward.
-- [ ] Runtime API reports monitor-only capabilities; no workflow mutation was enabled.
+- [ ] Runtime API reports the expected workflow capability (503 SP error before the SP exists;
+      `workflow_backend: metaflow` and a passing probe after).
 - [ ] Mongo secret rotation procedure and named operator owner are known.
 
 ## Not yet supported
 
-The current deployed runtime has no remote Argo/Metaflow trigger, stop, logs, cancel, requeue, or
-campaign execution adapter. It cannot safely orchestrate production backfills. The campaign
-control-plane SQLite/JSON files are not durable in Databricks Apps. FST and manifest storage
+On Databricks: campaign dispatch, namespace-wide stop and `argo-workflows create` are not
+supported (clear 501/permanent-failure errors). The Metaflow action path is untested against the
+live Outerbounds API until the SP exists. The campaign control-plane SQLite and admin action JSON
+are not durable in Databricks Apps (4e). FST and manifest storage
 resources also need deployment-owner provisioning. These gaps require separate reviewed changes;
 do not remove runtime guards or enable dispatch flags to bypass them.

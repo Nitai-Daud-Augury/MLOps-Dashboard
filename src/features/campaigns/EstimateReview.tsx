@@ -13,13 +13,13 @@ function Lane({ lane }: { lane: EstimateLane }) {
   </article>;
 }
 
-export function EstimateReview({ estimate, submitting, production, onSubmit, submitDisabled = false }: { estimate: Estimate; submitting: boolean; production: boolean; onSubmit: () => void; submitDisabled?: boolean }) {
+export function EstimateReview({ estimate, submitting, production, onSubmit }: { estimate: Estimate; submitting: boolean; production: boolean; onSubmit: () => void }) {
   const total = estimate.lanes.standard.machine_count + estimate.lanes.ulrpm.machine_count;
   return <section className="campaign-stage"><div className="stage-title"><span>3</span><div><h3>Review immutable estimate</h3><p>{estimate.disclaimer}</p></div></div>
     <div className="estimate-summary"><strong>{total.toLocaleString()} selected</strong><span>{estimate.excluded_unknown_or_ineligible.toLocaleString()} excluded</span><span>Expires {new Date(estimate.expires_at).toLocaleTimeString()}</span></div>
     <div className="estimate-lanes"><Lane lane={estimate.lanes.standard} /><Lane lane={estimate.lanes.ulrpm} /></div>
     {production ? <p className="production-count-confirmation">This production submission binds exactly <strong>{estimate.lanes.standard.machine_count.toLocaleString()} standard</strong>, <strong>{estimate.lanes.ulrpm.machine_count.toLocaleString()} ULRPM</strong>, and <strong>{estimate.excluded_unknown_or_ineligible.toLocaleString()} excluded/unknown</strong> machines.</p> : null}
     {!estimate.production_ready ? <p className="estimate-warning">Production is locked until Mongo, capacity, pricing, signing, and benchmark evidence are verified. Development submission remains available.</p> : null}
-    <button className="primary-button campaign-submit" type="button" disabled={submitDisabled || submitting || (production && !estimate.production_ready)} title={submitDisabled ? 'Workflow operations are disabled in monitor-only runtime' : undefined} onClick={onSubmit}>{submitting ? 'Submitting…' : submitDisabled ? 'Submission unavailable in monitor-only mode' : production && !estimate.production_ready ? 'Production verification required' : 'Confirm exact estimate and queue'}</button>
+    <button className="primary-button campaign-submit" type="button" disabled={submitting || (production && !estimate.production_ready)} onClick={onSubmit}>{submitting ? 'Submitting…' : production && !estimate.production_ready ? 'Production verification required' : 'Confirm exact estimate and queue'}</button>
   </section>;
 }

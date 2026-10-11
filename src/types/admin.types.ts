@@ -9,6 +9,11 @@ export interface RuntimeCapabilities {
 export interface RuntimeInfo {
   mode: "local" | "docker" | "databricks";
   capabilities: RuntimeCapabilities;
+  /** "argo_cli" locally, "metaflow" on Databricks Apps, null in docker. */
+  workflow_backend?: "argo_cli" | "metaflow" | null;
+  /** Why workflow mutations are unavailable (mutation routes answer 503/403 with this detail). */
+  workflow_mutations_error?: string | null;
+  workflow_mutations_error_type?: string | null;
 }
 export type AdminView =
   | "overview"
@@ -67,6 +72,9 @@ export interface AdminReadinessCheck {
   account_name?: string;
   container_name?: string;
   template_name?: string;
+  /** e.g. "outerbounds_sp_not_configured": actions stay clickable and the backend explains the error. */
+  error_type?: string | null;
+  backend?: "argo_cli" | "metaflow" | null;
 }
 export interface AdminReadiness {
   manifest_storage: AdminReadinessCheck;

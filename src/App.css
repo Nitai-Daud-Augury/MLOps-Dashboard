@@ -2660,20 +2660,62 @@ tbody tr { transition: background-color var(--transition-fast), transform var(--
 .machine-pick-mode button { background: var(--bg-surface); border: 1px solid var(--border-strong); border-radius: var(--radius-pill); color: var(--text-secondary); cursor: pointer; font: inherit; font-size: 12px; font-weight: 700; padding: 6px 10px; }
 .machine-pick-mode button.active { background: var(--accent-subtle); border-color: var(--info-border); color: var(--accent-text); }
 
-/* Outerbounds connectivity probe (Admin > Outerbounds probe) */
-.outerbounds-probe-panel { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); margin: 0 auto; max-width: 1480px; padding: 20px; }
-.outerbounds-probe-panel .panel-header { border-bottom: 1px solid var(--border); justify-content: space-between; margin-bottom: 16px; padding-bottom: 14px; }
-.outerbounds-probe-panel .probe-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; }
-.outerbounds-probe-panel .probe-flow, .outerbounds-probe-panel .probe-trigger { align-items: center; display: inline-flex; gap: 6px; font-size: 13px; }
-.probe-summary { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; color: var(--text-secondary); }
-.probe-table { border-collapse: collapse; width: 100%; font-size: 13px; }
-.probe-table th, .probe-table td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+/* Outerbounds connectivity probe (Admin > Outerbounds probe).
+   Global `th, td { white-space: nowrap }` made the detail column as wide as its longest
+   line; everything below re-enables wrapping and keeps the panel inside its column. */
+.outerbounds-probe-panel { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); box-sizing: border-box; margin: 0 auto; max-width: min(1480px, 100%); min-width: 0; padding: 20px; width: 100%; }
+.outerbounds-probe-panel .probe-header { align-items: flex-start; border-bottom: 1px solid var(--border); flex-wrap: wrap; justify-content: space-between; margin-bottom: 16px; padding-bottom: 14px; }
+.outerbounds-probe-panel .probe-header-text { flex: 1 1 420px; min-width: 0; }
+.outerbounds-probe-panel .probe-header-text p { overflow-wrap: anywhere; }
+.outerbounds-probe-panel .probe-meta { color: var(--text-secondary); font-size: 12px; margin: 4px 0 0; }
+.outerbounds-probe-panel .probe-actions { align-items: center; display: flex; flex: 0 1 auto; flex-wrap: wrap; gap: 12px; min-width: 0; }
+.outerbounds-probe-panel .probe-flow, .outerbounds-probe-panel .probe-trigger { align-items: center; display: inline-flex; font-size: 13px; gap: 6px; }
+.outerbounds-probe-panel .probe-flow select { max-width: 100%; min-width: 0; }
+.probe-summary { align-items: center; color: var(--text-secondary); display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 0 0 12px; }
+.probe-counts { color: var(--text-muted); font-size: 12px; }
+.probe-table-wrap { max-width: 100%; min-width: 0; overflow-x: auto; }
+.probe-table { border-collapse: collapse; font-size: 13px; table-layout: fixed; width: 100%; }
+.probe-table col.probe-col-stage { width: 22%; }
+.probe-table col.probe-col-status { width: 128px; }
+.probe-table col.probe-col-error { width: 16%; }
+.probe-table col.probe-col-ms { width: 64px; }
+.probe-table th, .probe-table td { border-bottom: 1px solid var(--border); padding: 10px; text-align: left; vertical-align: top; white-space: normal; }
+.probe-table tr { cursor: default; }
+.probe-table tbody tr:hover { background: transparent; transform: none; }
 .probe-table td.num, .probe-table th.num { text-align: right; white-space: nowrap; }
-.probe-table .probe-detail { word-break: break-word; }
+.probe-table tr.fail td:first-child { box-shadow: inset 3px 0 0 var(--error); }
+.probe-table tr.expected_fail td:first-child { box-shadow: inset 3px 0 0 var(--warning-border); }
+.probe-table tr.pass td:first-child { box-shadow: inset 3px 0 0 var(--success); }
+.probe-table tr.skip td:first-child { box-shadow: inset 3px 0 0 var(--border); }
+.probe-stage-name { color: var(--text-primary); display: block; font-weight: 700; }
+.probe-stage-description { color: var(--text-muted); display: block; font-size: 12px; line-height: 1.4; margin-top: 4px; }
+.probe-status-cell .probe-badge { margin: 0 6px 4px 0; }
+.probe-http { color: var(--text-secondary); display: inline-block; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; }
+.probe-error-cell, .probe-detail-text, .probe-hint, .probe-stage-description { overflow-wrap: anywhere; word-break: break-word; }
+.probe-detail-cell { min-width: 0; }
+.probe-detail-text { line-height: 1.45; white-space: pre-wrap; }
+.probe-detail-text.clamped { -webkit-box-orient: vertical; -webkit-line-clamp: 4; display: -webkit-box; line-clamp: 4; overflow: hidden; }
+.probe-detail-toggle { align-items: center; background: none; border: 0; color: var(--accent-text); cursor: pointer; display: inline-flex; font: inherit; font-size: 12px; font-weight: 700; gap: 2px; margin-top: 4px; padding: 0; }
+.probe-hint { border-left: 3px solid var(--border); color: var(--text-secondary); font-size: 12px; line-height: 1.45; margin: 8px 0 0; padding: 4px 0 4px 8px; }
+.probe-hint.fail { border-left-color: var(--error); }
+.probe-hint.expected_fail { border-left-color: var(--warning-border); }
+.probe-hint.pass { border-left-color: var(--success); }
 .probe-badge { border: 1px solid transparent; border-radius: var(--radius-pill); display: inline-flex; font-size: 11px; font-weight: 800; line-height: 1; padding: 5px 8px; white-space: nowrap; }
 .probe-badge.pass { background: var(--success-bg); border-color: var(--success); color: var(--success-text); }
 .probe-badge.fail { background: var(--error-bg); border-color: var(--error); color: var(--error-text); }
 .probe-badge.expected_fail { background: var(--warning-bg); border-color: var(--warning-border); color: var(--warning-text); }
-.probe-badge.skip { background: var(--bg-inset); border-color: var(--border); color: var(--text-secondary); }
-.probe-error { background: var(--error-bg); border: 1px solid var(--error); border-radius: var(--radius-md); color: var(--error-text); margin-bottom: 12px; padding: 10px 12px; }
+.probe-badge.skip { background: var(--bg-inset); border-color: var(--border); border-style: dashed; color: var(--text-secondary); }
+.probe-error { background: var(--error-bg); border: 1px solid var(--error); border-radius: var(--radius-md); color: var(--error-text); margin-bottom: 12px; overflow-wrap: anywhere; padding: 10px 12px; }
 .probe-empty { color: var(--text-secondary); margin: 0; }
+/* Narrow screens: each stage becomes a stacked card instead of a 5-column row. */
+@media (max-width: 900px) {
+  .outerbounds-probe-panel { padding: 14px; }
+  .probe-table, .probe-table tbody, .probe-table tr, .probe-table td { display: block; width: 100%; box-sizing: border-box; }
+  .probe-table colgroup, .probe-table thead { display: none; }
+  .probe-table tr { border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 10px; overflow: hidden; }
+  .probe-table td { border-bottom: 0; padding: 6px 12px; }
+  .probe-table td.num { text-align: left; }
+  .probe-table td[data-label]:not(.probe-stage-cell)::before { color: var(--text-muted); content: attr(data-label); display: block; font-size: 11px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; }
+  .probe-table tr td:first-child { padding-top: 10px; }
+  .probe-table tr td:last-child { padding-bottom: 10px; }
+}

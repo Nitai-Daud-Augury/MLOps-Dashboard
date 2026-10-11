@@ -460,7 +460,7 @@ class AdminActionRepository:
                         action.status = "succeeded"
                 else:
                     action.status = "failed"
-                    action.error = f"Command exited with {result.returncode}"
+                    action.error = _child_error(action.stdout) or f"Command exited with {result.returncode}"
                     if action.action == "trigger":
                         action.phase = "failed"
                 self._persist()
@@ -649,35 +649,7 @@ class WorkflowCommandBuilder:
             for item in template.get("spec", {}).get("arguments", {}).get("parameters", [])
             if isinstance(item, dict)
         }
-        deployed_contract = str(parameters.get("orchestrator_contract_version", "")).strip('"')
-        if deployed_contract not in ULRPM_ORCHESTRATOR_SUPPORTED_CONTRACTS:
-            return {
-                "ready": False,
-                "detail": (
-                    "ULRPM parent orchestrator template is stale: expected one of "
-                    f"{sorted(ULRPM_ORCHESTRATOR_SUPPORTED_CONTRACTS)}, found {deployed_contract or 'none'}. "
-                    "Redeploy UlrpmDevBackfillOrchestratorFlow.py before submitting."
-                ),
-                "workflow_template": self.ulrpm_orchestrator_template,
-                "expected_contract": ULRPM_ORCHESTRATOR_CONTRACT_VERSION,
-                "deployed_contract": deployed_contract or None,
-            }
-        supports_split = deployed_contract == ULRPM_ORCHESTRATOR_CONTRACT_VERSION
-        detail = (
-            "ULRPM parent orchestrator and child FSTBackfill template are ready."
-            if supports_split
-            else (
-                "ULRPM parent orchestrator template reports legacy contract "
-                f"{deployed_contract}; only Full month split is allowed until v5 is redeployed."
-            )
-        )
-        return {
-            "ready": True,
-            "detail": detail,
-            "workflow_template": self.ulrpm_orchestrator_template,
-            "contract_version": deployed_contract,
-            "supports_submonth_split": supports_split,
-        }
+        return evaluate_orchestrator_contract(parameters, self.ulrpm_orchestrator_template)
 
     def build_trigger(self, source: WorkflowSourceRequest, params: TriggerParams) -> tuple[Path, list[str]]:
         if not params.storage_account_manifest_path.strip():
@@ -915,6 +887,42 @@ class WorkflowCommandBuilder:
         return DEFAULT_METAFLOW_DIR, [
             *command,
         ]
+
+
+def evaluate_orchestrator_contract(parameters: dict, workflow_template: str) -> dict:
+    """Readiness verdict from the deployed ULRPM orchestrator template parameters.
+
+    Shared by the local (kubectl) and Databricks (Metaflow client) readiness checks.
+    """
+    deployed_contract = str(parameters.get("orchestrator_contract_version", "")).strip('"')
+    if deployed_contract not in ULRPM_ORCHESTRATOR_SUPPORTED_CONTRACTS:
+        return {
+            "ready": False,
+            "detail": (
+                "ULRPM parent orchestrator template is stale: expected one of "
+                f"{sorted(ULRPM_ORCHESTRATOR_SUPPORTED_CONTRACTS)}, found {deployed_contract or 'none'}. "
+                "Redeploy UlrpmDevBackfillOrchestratorFlow.py before submitting."
+            ),
+            "workflow_template": workflow_template,
+            "expected_contract": ULRPM_ORCHESTRATOR_CONTRACT_VERSION,
+            "deployed_contract": deployed_contract or None,
+        }
+    supports_split = deployed_contract == ULRPM_ORCHESTRATOR_CONTRACT_VERSION
+    detail = (
+        "ULRPM parent orchestrator and child FSTBackfill template are ready."
+        if supports_split
+        else (
+            "ULRPM parent orchestrator template reports legacy contract "
+            f"{deployed_contract}; only Full month split is allowed until v5 is redeployed."
+        )
+    )
+    return {
+        "ready": True,
+        "detail": detail,
+        "workflow_template": workflow_template,
+        "contract_version": deployed_contract,
+        "supports_submonth_split": supports_split,
+    }
 
 
 class RunningWorkflowProvider:
@@ -1223,6 +1231,26 @@ def _workflow_id_from_submit_output(stdout: str) -> str | None:
     """Extract the Argo workflow name emitted by `argo submit` when available."""
     match = re.search(r"^Name:\s*([A-Za-z0-9_.-]+)\s*$", stdout, re.MULTILINE)
     return match.group(1) if match else None
+
+
+# Result line printed by the Databricks (Metaflow client) action child; see
+# outerbounds_actions.ACTION_MARKER. Argo CLI output never contains it.
+_ACTION_MARKER = "__OB_ACTION_RESULT__"
+
+
+def _child_error(stdout: str) -> str | None:
+    """Readable error from a failed Metaflow action child (None for CLI output)."""
+    for line in reversed((stdout or "").splitlines()):
+        if line.startswith(_ACTION_MARKER):
+            try:
+                payload = json.loads(line[len(_ACTION_MARKER):])
+            except ValueError:
+                return None
+            if payload.get("ok"):
+                return None
+            error_type = payload.get("error_type") or "Error"
+            return f"{error_type}: {payload.get('error') or 'Metaflow call failed'}"
+    return None
 
 
 def _now() -> str:

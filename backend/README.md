@@ -141,8 +141,12 @@ safety-contract violations still fail before any child is submitted.
 The SQLite control plane uses WAL, atomic inventory swaps, unique work-item
 idempotency keys, lease-safe dispatch, and one ready window per machine. Use a
 persistent mounted `BACKFILL_CONTROL_PLANE_DB_PATH` in production. Keep
-`BACKFILL_DISPATCH_ENABLED=0` until the canary gates in
-`BACKFILL_CAMPAIGNS.md` have been completed.
+`BACKFILL_DISPATCH_ENABLED=0` locally until the canary gates in
+`BACKFILL_CAMPAIGNS.md` have been completed. The Databricks app sets it to `1`;
+there the campaign adapter refuses submissions (the Metaflow trigger API cannot
+set the idempotent workflow name), while per-machine admin actions run through
+the Metaflow client once the Outerbounds service principal is configured
+(`outerbounds_actions.py`, docs/DEPLOYMENT_RUNBOOK.md).
 
 Estimates show separate allocated-share and node-billing ranges. Scheduler and
 retry factors are explicit assumptions; storage transaction cost stays marked
