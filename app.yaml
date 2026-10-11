@@ -7,8 +7,8 @@ env:
   # Admin workflow actions (trigger / stop) run through GitHub Actions on
   # Databricks: the app dispatches .github/workflows/outerbounds-dispatch.yml,
   # which logs in to Outerbounds as the OIDC machine user mlops-dashboard-sp.
-  # Until GITHUB_DISPATCH_TOKEN is bound below every action answers HTTP 503
-  # (github_dispatch_not_configured) with setup steps.
+  # GITHUB_DISPATCH_TOKEN is bound below from the github_dispatch_token secret;
+  # without it every action answers HTTP 503 (github_dispatch_not_configured).
   # BACKFILL_DISPATCH_ENABLED=1 also starts the campaign dispatcher, which on
   # Databricks refuses submissions (no idempotent Argo workflow name through
   # GitHub Actions or the Metaflow trigger API). The prod target deploys this same file.
@@ -78,14 +78,13 @@ env:
     value: main
   - name: GITHUB_DISPATCH_WORKFLOW
     value: outerbounds-dispatch.yml
-  # GITHUB_DISPATCH_TOKEN - NOT bound yet: the secret does not exist, and an
-  # unresolved valueFrom would fail the deploy. After
-  #   databricks secrets put-secret mlops-dashboard github_dispatch_token -p mlops-dev
-  # uncomment the github_dispatch_token resource in resources/mlops_dashboard.app.yml
-  # and these lines. Deployment ids = Argo WorkflowTemplate names (the dev
-  # defaults the local dashboard uses are shown):
-  # - name: GITHUB_DISPATCH_TOKEN
-  #   valueFrom: github_dispatch_token
+  # Fine-grained PAT from secret mlops-dashboard/github_dispatch_token (resource
+  # github_dispatch_token in resources/mlops_dashboard.app.yml). Never a literal value.
+  - name: GITHUB_DISPATCH_TOKEN
+    valueFrom: github_dispatch_token
+  # Deployment ids (Argo WorkflowTemplate names) - NOT set yet: triggers answer
+  # "deployment id not configured" until they are; the probe, status and list_runs
+  # do not need them. Dev defaults the local dashboard uses:
   # - name: OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID
   #   value: fstbackfill.test.devcoreme.fstbackfill-zvsui
   # - name: OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID
