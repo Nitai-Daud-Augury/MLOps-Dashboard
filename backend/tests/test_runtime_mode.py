@@ -119,7 +119,6 @@ _MUTATION_ROUTES = [
     "/api/admin/backfills/all",
     "/api/admin/backfills/orchestrated",
     "/api/admin/actions/action-a/cancel-before-submit",
-    "/api/admin/fullrlbl/trigger",
     "/api/admin/workflows/terminate",
     "/api/admin/logs",
     "/api/machines/machine-a/backfills/202608/cancel",
@@ -192,7 +191,6 @@ def test_nonlocal_readiness_and_workflow_status_never_use_local_cli(monkeypatch)
     monkeypatch.setattr(app_module.running_workflows, "list_running", unexpected)
     monkeypatch.setattr(app_module.running_workflows, "lookup_workflows", unexpected)
     monkeypatch.setattr(app_module.command_builder, "ulrpm_orchestrator_readiness", unexpected)
-    monkeypatch.setattr(app_module.command_builder, "fullrlbl_test_readiness", unexpected)
     monkeypatch.setattr(app_module.manifest_writer, "readiness", lambda: {"ready": True})
 
     for path in (
@@ -200,7 +198,6 @@ def test_nonlocal_readiness_and_workflow_status_never_use_local_cli(monkeypatch)
         "/api/admin/workflows/running",
         "/api/admin/workflows/summary",
         "/api/admin/readiness",
-        "/api/admin/fullrlbl/readiness",
         "/api/backfill/runner-lock-status",
     ):
         response = _request(app_module.app, "GET", path)

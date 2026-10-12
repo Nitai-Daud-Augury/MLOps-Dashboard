@@ -25,7 +25,6 @@ from backfill_dashboard import github_dispatch as gha
 from backfill_dashboard import outerbounds_gha
 from backfill_dashboard.admin import (
     AdminActionRepository,
-    FullRlblTestParams,
     LogLookupParams,
     PROD_CONFIRMATION,
     TerminateParams,
@@ -52,7 +51,6 @@ OTHER_MACHINE = "6817571193e37ef05fffcd1c"
 DEPLOYMENTS = {
     "OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID": "fstbackfill.test.fstbackfill-abc",
     "OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID": "fstbkfill.test.ulrpmorchestrator-abc",
-    "OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID": "fullrsttest.test.fullrlbl-abc",
 }
 
 
@@ -300,7 +298,7 @@ def test_databricks_without_token_returns_503_github_dispatch_not_configured(mon
     monkeypatch.setattr(app_module, "RUNTIME_INFO", runtime_info(GHA_RUNTIME))
     monkeypatch.setattr(app_module.admin_repository, "create", lambda *a, **k: pytest.fail("side effect before token check"))
     for path in ("/api/admin/workflows/trigger", "/api/admin/backfills/orchestrated", "/api/admin/workflows/terminate",
-                 "/api/admin/fullrlbl/trigger", "/api/v1/backfill-campaigns"):
+                 "/api/v1/backfill-campaigns"):
         response = _request(app_module.app, "POST", path, {})
         assert response.status_code == 503, (path, response.body)
         assert response.body["error_type"] == "github_dispatch_not_configured"
@@ -374,9 +372,7 @@ def test_trigger_commands_carry_the_argo_parameters_and_keep_lanes_sequential():
     argo_values = dict(item.split("=", 1) for item in argo if "=" in item)
     assert all(json.dumps(inputs["params"][name]) == argo_values[name] for name in inputs["params"])
     assert TOKEN not in " ".join(command)
-    # FullRlbl and FSTBackfill map to their flows; validation is shared with the argo path.
-    _, fullrlbl = _builder().build_fullrlbl_test_trigger(FullRlblTestParams(machine_ids=[MACHINE], fst_namespace="dev-ns"))
-    assert json.loads(fullrlbl[-1])["inputs"]["flow"] == "FullRlblDevFstTestFlow"
+    # FSTBackfill validation is shared with the argo path.
     with pytest.raises(ValueError, match=PROD_CONFIRMATION):
         _builder().build_trigger(WorkflowSourceRequest(), TriggerParams(environment="prod", storage_account_manifest_path="m"))
 
@@ -501,7 +497,7 @@ def test_admin_run_passes_the_pending_action_id_to_the_child(monkeypatch, tmp_pa
 
 # --- status provider: cached, background refresh ---------------------------------------------
 
-def test_status_provider_never_blocks_and_serves_cached_snapshots():
+def test_status_provider_never_refreshes_by_itself_and_serves_snapshots():
     calls, pending = [], []
 
     def runner(action, request_id, inputs, **kwargs):
@@ -515,23 +511,26 @@ def test_status_provider_never_blocks_and_serves_cached_snapshots():
     now = [0.0]
     provider = GithubActionsRunningWorkflowProvider(environ={"GITHUB_DISPATCH_TOKEN": TOKEN}, runner=runner,
                                                     start_thread=pending.append, clock=lambda: now[0])
-    first = provider._list_running()
-    assert first["workflows"] == [] and first["refreshing"] is True and calls == []  # returned at once
-    assert provider.lookup_workflows(["fstbackfill-aaa"]) == []  # nothing known yet -> no state change
-    assert len(pending) == 1  # single-flight: no second refresh while one is running
+    first = provider.list_running()
+    assert first["workflows"] == [] and first["refreshing"] is False and calls == [] and pending == []
+    assert any("click Refresh" in w for w in first["warnings"])
+    assert provider.lookup_workflows(["fstbackfill-aaa"]) == [] and pending == []  # reads never dispatch
+    assert provider.start_refresh() is True and provider.refreshing is True
+    assert provider.start_refresh() is False and len(pending) == 1  # single flight: callers join
     pending.pop()()
-    running = provider._list_running()
+    assert provider.refreshing is False and provider.snapshot_version == 1 and provider.last_completed() == 0.0
+    running = provider.list_running()
     assert [item["workflow_id"] for item in running["workflows"]] == ["fstbackfill-aaa"]
-    recent = provider._list_recent()
-    assert recent["counts"] == {"active": 1, "completed": 1, "failed": 0}
+    recent = provider.list_recent()
+    assert recent["counts"] == {"active": 1, "completed": 1, "failed": 0} and recent["snapshot_version"] == 1
     assert recent["workflow_backend"] == "github_actions" and any("GitHub Actions" in w for w in recent["warnings"])
     assert [item["workflow_id"] for item in provider.lookup_workflows(["argo-fstbackfill-bbb"])] == ["fstbackfill-bbb"]
     action, request_id, inputs = calls[0]
     assert action == "list_runs" and inputs["action"] == "list_runs" and inputs["request_id"] == request_id
-    assert pending == []  # fresh: no refresh
     now[0] = 10_000.0
-    provider._list_running()
-    assert len(pending) == 1  # stale -> one background refresh
+    provider.list_running()
+    provider.list_recent()
+    assert pending == [] and len(calls) == 1  # no TTL refresh anymore
 
 
 def test_status_refresh_error_keeps_last_good_list():
@@ -544,13 +543,11 @@ def test_status_refresh_error_keeps_last_good_list():
             raise item
         return item
 
-    now = [0.0]
     provider = GithubActionsRunningWorkflowProvider(environ={"GITHUB_DISPATCH_TOKEN": TOKEN}, runner=runner,
-                                                    start_thread=lambda target: target(), clock=lambda: now[0])
-    provider._list_running()
-    now[0] = 10_000.0
-    provider._list_running()
-    payload = provider._list_running()
+                                                    start_thread=lambda target: target())
+    provider.start_refresh()
+    provider.start_refresh()
+    payload = provider.list_running()
     assert [item["workflow_id"] for item in payload["workflows"]] == ["wf-a"]
     assert "slow runner" in payload["error"] and payload["error_type"] == "github_dispatch_timeout"
 
@@ -707,8 +704,6 @@ def test_script_flow_parameter_allowlist_matches_the_dashboard_builders():
         "UlrpmDevBackfillOrchestratorFlow": _builder().build_ulrpm_orchestrator_trigger(
             machine_ids=[MACHINE], manifest_template="p/m_{month_index}.parquet", start_index=17, end_index=18,
             params=TriggerParams(max_parallel_steps=1), month_indices_by_machine={MACHINE: [17]}, manifest_plan=plan),
-        "FullRlblDevFstTestFlow": _builder().build_fullrlbl_test_trigger(
-            FullRlblTestParams(machine_ids=[MACHINE], fst_namespace="dev-ns", manifest_path="m/x.parquet")),
     }
     for flow, (_, command) in builders.items():
         inputs = json.loads(command[-1])["inputs"]
@@ -801,8 +796,13 @@ def test_dispatch_workflow_shape_is_injection_safe():
     for flag in ("--name mlops-dashboard-sp", "--deployment-domain augury.obp.outerbounds.com", "--perimeter default", "--github-actions"):
         assert flag in login["run"]
     install = next(step for step in steps if "pip install" in step.get("run", ""))
+    assert "-r .github/ob-dispatch-requirements.txt" in install["run"]
+    pins = (ROOT / ".github" / "ob-dispatch-requirements.txt").read_text(encoding="utf-8").split()
     for pin in ("outerbounds[azure]==0.12.39", "ob-metaflow==2.19.34.1", "ob-metaflow-extensions==1.6.24"):
-        assert pin in install["run"]
+        assert pin in pins
+    assert not any(line.split("==")[0] == "metaflow" for line in pins)
+    setup = next(step for step in steps if step.get("uses", "").startswith("actions/setup-python@"))
+    assert setup["with"]["cache"] == "pip" and setup["with"]["cache-dependency-path"] == ".github/ob-dispatch-requirements.txt"
     names = [step.get("name", step.get("uses", "")) for step in steps]
     assert names.index("Mask parameter values in the log") < names.index("Run action")
     upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@"))

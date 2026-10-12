@@ -13,6 +13,7 @@ from .scanner import BackfillScanner
 from .silver import DatabricksSilverProvider
 from .storage import AzureBlobDiscovery, AzureBlobStore
 from .control_store import build_control_store
+from .scan_snapshot_store import ScanSnapshotStore
 from .control_plane import ControlPlane
 from .runtime_mode import runtime_info
 from .data_sources import describe_data_sources, format_data_sources_log
@@ -88,7 +89,7 @@ def build_components():
     # Coverage scanning remains scoped to the curated local ULRPM list.
     # Lifecycle enrichment (Mongo or Databricks) only looks up those IDs.
     scanner = BackfillScanner(settings, file_inventory, blob_store, silver_provider, lifecycle_inventory, lifecycle_status)
-    repository = ReportRepository(settings)
+    repository = ReportRepository(settings, snapshot_store=ScanSnapshotStore.from_env(settings.state_path))
     admin_repository = AdminActionRepository(settings.state_path.with_name("ulrpm_backfill_admin_actions.json"))
     workflow_reviews = WorkflowReviewRepository(settings.state_path.with_name("ulrpm_backfill_workflow_reviews.json"))
     manifest_writer = BackfillManifestWriter()

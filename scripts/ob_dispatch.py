@@ -78,20 +78,6 @@ FLOW_PARAMETERS: dict[str, dict[str, str]] = {
         "redeploy_fst_template": _BOOL,
         "machine_manifest_plan": _STR,
     },
-    "FullRlblDevFstTestFlow": {
-        "machine-ids": _STR,
-        "fst-namespace": _STR,
-        "lst-namespace": _STR,
-        "pipeline-name": _STR,
-        "runtime-patch": _STR,
-        "persist-dev-lst": _STR,
-        "seed-dev-lst": _STR,
-        "feature-fetch-mode": _STR,
-        "test-mode": _STR,
-        "wide-range-since": _STR,
-        "wide-range-until": _STR,
-        "manifest-path": _STR,
-    },
 }
 FLOWS = tuple(FLOW_PARAMETERS)
 NAMESPACE_PARAMS = ("name-space", "name_space", "fst-namespace")

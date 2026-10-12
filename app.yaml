@@ -91,10 +91,6 @@ env:
     value: fstbackfill.test.devfstmon.fstbackfill-mrqqu
   - name: OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID
     value: fstbkfill.test.devfstm.ulrpmdeatorflow-hwqbr
-  # FullRlbl test deployment: NOT set yet (name to be confirmed); its trigger
-  # answers "deployment id not configured" until it is.
-  # - name: OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID
-  #   value: <FullRlblDevFstTestFlow WorkflowTemplate name>
   # Probe: OUTERBOUNDS_PROBE_GHA_DISPATCH=1 lets Admin > Outerbounds probe dispatch
   # action=list_runs (read-only) on request. Off by default.
   # Alternative backend (OUTERBOUNDS_DISPATCH_BACKEND=metaflow): an Outerbounds

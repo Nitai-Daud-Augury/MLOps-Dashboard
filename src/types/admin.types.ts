@@ -36,7 +36,6 @@ export interface AdminSpec {
   templates?: {
     fst_backfill: string;
     ulrpm_orchestrator: string;
-    fullrlbl_test: string;
   };
   known_no_data_note: string;
   outerbounds_url: string;
@@ -79,7 +78,6 @@ export interface AdminReadinessCheck {
 export interface AdminReadiness {
   manifest_storage: AdminReadinessCheck;
   argo: AdminReadinessCheck;
-  fullrlbl_test: AdminReadinessCheck;
 }
 export interface Toast {
   id: string;

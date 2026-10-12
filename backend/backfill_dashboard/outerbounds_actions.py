@@ -49,7 +49,6 @@ from typing import Any, Callable, Mapping
 
 from . import outerbounds_probe as probe
 from .admin import (
-    FullRlblTestParams,
     LogLookupParams,
     OUTERBOUNDS_RUNS_URL,
     RunningWorkflowProvider,
@@ -72,9 +71,8 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 DEPLOYMENT_ENV = {
     "fst_backfill": "OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID",
     "ulrpm_orchestrator": "OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID",
-    "fullrlbl_test": "OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID",
 }
-DEFAULT_STATUS_FLOWS = ("FSTBackfill", "UlrpmDevBackfillOrchestratorFlow", "FullRlblDevFstTestFlow")
+DEFAULT_STATUS_FLOWS = ("FSTBackfill", "UlrpmDevBackfillOrchestratorFlow")
 TERMINATE_TOKEN_ENV = "OUTERBOUNDS_TERMINATE_AUTHORIZE_TOKEN"
 _PARAM_VALUE_LIMIT = 8192
 _LOG_LIMIT = 200_000
@@ -359,19 +357,6 @@ class MetaflowCommandBuilder(WorkflowCommandBuilder):
                     "detail": f"ULRPM parent orchestrator deployment {deployment} is unavailable: {exc}"}
         return {**evaluate_orchestrator_contract(template.get("parameters") or {}, deployment), "backend": self.backend}
 
-    def fullrlbl_test_readiness(self) -> dict:
-        deployment, problem = self._deployment_readiness("fullrlbl_test")
-        if problem:
-            return problem
-        try:
-            self._template(deployment)
-        except WorkflowBackendError as exc:
-            return {"ready": False, "backend": self.backend, "error_type": exc.error_type, "template_name": deployment,
-                    "detail": f"FullRlbl test deployment {deployment} is unavailable: {exc}"}
-        return {"ready": True, "backend": self.backend, "template_name": deployment,
-                "detail": "FullRlbl test deployment is reachable through the Metaflow client."}
-
-    # actions --------------------------------------------------------------------------
     def validate_cli(self, source: WorkflowSourceRequest) -> dict:
         return {"ready": True, "backend": self.backend,
                 "detail": "No flow source is needed on Databricks: actions trigger the deployed template via the Metaflow client."}
@@ -399,10 +384,6 @@ class MetaflowCommandBuilder(WorkflowCommandBuilder):
     def build_ulrpm_orchestrator_trigger(self, **kwargs: Any) -> tuple[Path, list[str]]:
         _, argo_command = super().build_ulrpm_orchestrator_trigger(**kwargs)
         return self._trigger_command("ulrpm_orchestrator", argo_command)
-
-    def build_fullrlbl_test_trigger(self, params: FullRlblTestParams) -> tuple[Path, list[str]]:
-        _, argo_command = super().build_fullrlbl_test_trigger(params)
-        return self._trigger_command("fullrlbl_test", argo_command)
 
     def build_terminate(self, params: TerminateParams) -> tuple[Path, list[str]]:
         super().build_terminate(params)  # identical validation (prod confirmation, id format); builds nothing on Databricks

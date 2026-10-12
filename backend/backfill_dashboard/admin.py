@@ -46,13 +46,8 @@ ULRPM_ORCHESTRATOR_SUPPORTED_CONTRACTS = {
 }
 MANIFEST_PLAN_MAX_BYTES = 256 * 1024
 
-DEFAULT_FULLRLBL_TEST_TEMPLATE = os.getenv(
-    "BACKFILL_FULLRLBL_TEST_TEMPLATE",
-    "fullrsttest.test.testulr.fullrlestflow-zsx6n",
-)
 OUTERBOUNDS_BASE_URL = "https://ui.augury.obp.outerbounds.com/dashboard/runs/p/default"
 OUTERBOUNDS_RUNS_URL = f"{OUTERBOUNDS_BASE_URL}?flow_id=FSTBackfill"
-OUTERBOUNDS_FULLRLBL_TEST_URL = f"{OUTERBOUNDS_BASE_URL}?flow_id=FullRlblDevFstTestFlow"
 
 
 @dataclass
@@ -90,23 +85,6 @@ class TerminateParams:
     workflow_id: str = ""
     confirm_production: bool = False
     confirmation_text: str = ""
-
-
-@dataclass
-class FullRlblTestParams:
-    machine_ids: list[str] = field(default_factory=list)
-    fst_namespace: str = DEFAULT_DEV_NAMESPACE
-    lst_namespace: str = "severity-relabel-dev-ulrpm"
-    pipeline_name: str = ""
-    manifest_path: str = ""
-    runtime_patch: bool = False
-    persist_dev_lst: bool = False
-    seed_dev_lst: bool = False
-    feature_fetch_mode: str = "legacy"
-    test_mode: str = "fetch_only"
-    wide_range_since: str = "2024/08/30/00"
-    wide_range_until: str = "2026/08/30/00"
-    memory_mb: int = 8192
 
 
 @dataclass
@@ -151,6 +129,8 @@ class AdminActionRepository:
         self.state_path = state_path
         self._lock = threading.Lock()
         self._actions: dict[str, AdminAction] = self._load()
+        # Called with the finished action (dict) after every run(); used for event-driven status refresh.
+        self.on_finished: list = []
 
     def list(self) -> list[dict]:
         with self._lock:
@@ -475,6 +455,13 @@ class AdminActionRepository:
                 if action.action == "trigger":
                     action.phase = "failed"
                 self._persist()
+        with self._lock:
+            finished = asdict(action)
+        for hook in list(self.on_finished):
+            try:
+                hook(finished)
+            except Exception as exc:  # noqa: BLE001 - a hook must never fail the action
+                print(f"[admin] on_finished hook failed: {type(exc).__name__}: {exc}", flush=True)
 
     def _load(self) -> dict[str, AdminAction]:
         if not self.state_path.exists():
@@ -547,10 +534,9 @@ class WorkflowReviewRepository:
 
 
 class WorkflowCommandBuilder:
-    def __init__(self, *, fst_backfill_template: str | None = None, ulrpm_orchestrator_template: str | None = None, fullrlbl_test_template: str | None = None) -> None:
+    def __init__(self, *, fst_backfill_template: str | None = None, ulrpm_orchestrator_template: str | None = None) -> None:
         self.fst_backfill_template = fst_backfill_template or DEFAULT_FST_BACKFILL_TEMPLATE
         self.ulrpm_orchestrator_template = ulrpm_orchestrator_template or DEFAULT_ULRPM_ORCHESTRATOR_TEMPLATE
-        self.fullrlbl_test_template = fullrlbl_test_template or DEFAULT_FULLRLBL_TEST_TEMPLATE
 
     def resolve_source(self, source: WorkflowSourceRequest) -> tuple[Path, Path]:
         if source.source_type == "local":
@@ -796,67 +782,6 @@ class WorkflowCommandBuilder:
         stream_flag = "--stderr" if params.stream == "stderr" else "--stdout"
         return cwd, [_python_executable(), str(flow_path), "logs", params.run_task_path, stream_flag]
 
-    def fullrlbl_test_readiness(self) -> dict:
-        readiness = self.platform_readiness()
-        if not readiness["ready"]:
-            return readiness
-        command = [
-            "kubectl", "get", "workflowtemplate",
-            "-n", ARGO_NAMESPACE,
-            self.fullrlbl_test_template,
-            "-o", "name",
-        ]
-        try:
-            subprocess.run(command, capture_output=True, text=True, check=True, timeout=30)
-        except Exception as exc:
-            return {
-                "ready": False,
-                "detail": (
-                    f"FullRlbl test template '{self.fullrlbl_test_template}' is unavailable: {exc}. "
-                    "Deploy the flow first from the WS: python FullRlblDevFstTestFlow.py "
-                    "--package-suffixes=.yaml,.py --no-pylint --branch test_ulrpm_dev_fst "
-                    "--with retry argo-workflows create"
-                ),
-                "template_name": self.fullrlbl_test_template,
-            }
-        return {
-            "ready": True,
-            "detail": "FullRlbl test template is deployed and ready.",
-            "template_name": self.fullrlbl_test_template,
-        }
-
-    def build_fullrlbl_test_trigger(self, params: FullRlblTestParams) -> tuple[Path, list[str]]:
-        if not params.machine_ids:
-            raise ValueError("At least one machine ID is required")
-        if not params.fst_namespace or params.fst_namespace == PROD_NAMESPACE:
-            raise ValueError("fst_namespace must be a dev namespace, not empty or production")
-        if params.fst_namespace == "ulrpm-fst-dev-20260830-feature-store":
-            raise ValueError("Pass the FST namespace, not the container name")
-        pipeline_name = params.pipeline_name.strip()
-        if not pipeline_name:
-            pipeline_name = f"fullrlbl-dev-fst-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
-
-        command = [
-            "argo", "submit",
-            "-n", ARGO_NAMESPACE,
-            "--from", f"workflowtemplate/{self.fullrlbl_test_template}",
-            "-p", f"machine-ids={json.dumps(','.join(params.machine_ids))}",
-            "-p", f"fst-namespace={json.dumps(params.fst_namespace)}",
-            "-p", f"lst-namespace={json.dumps(params.lst_namespace)}",
-            "-p", f"pipeline-name={json.dumps(pipeline_name)}",
-            "-p", f"runtime-patch={json.dumps(str(params.runtime_patch).lower())}",
-            "-p", f"persist-dev-lst={json.dumps(str(params.persist_dev_lst).lower())}",
-            "-p", f"seed-dev-lst={json.dumps(str(params.seed_dev_lst).lower())}",
-            "-p", f"feature-fetch-mode={json.dumps(params.feature_fetch_mode)}",
-            "-p", f"test-mode={json.dumps(params.test_mode)}",
-            "-p", f"wide-range-since={json.dumps(params.wide_range_since)}",
-            "-p", f"wide-range-until={json.dumps(params.wide_range_until)}",
-        ]
-        if params.manifest_path.strip():
-            command.extend(["-p", f"manifest-path={json.dumps(params.manifest_path.strip())}"])
-
-        return DEFAULT_METAFLOW_DIR, command
-
     def build_terminate(self, params: TerminateParams) -> tuple[Path, list[str]]:
         namespace = PROD_NAMESPACE if params.environment == "prod" else params.namespace.strip()
         workflow_id = params.workflow_id.strip()
@@ -942,6 +867,23 @@ class RunningWorkflowProvider:
 
     def list_running(self) -> dict:
         return self._cached("running", ttl_seconds=10, loader=self._list_running)
+
+    # On-demand refresh contract (used by status_refresh.StatusRefreshGate). The live CLI
+    # source reads the cluster on demand, so a "refresh" just drops the short read cache.
+    @property
+    def refreshing(self) -> bool:
+        return False
+
+    def start_refresh(self) -> bool:
+        """Start one status refresh; False if one is already in flight (the caller joins it)."""
+        with self._cache_lock:
+            self._running_cache = None
+            self._recent_cache = None
+        return True
+
+    def last_completed(self) -> float | None:
+        """time.monotonic() of the last finished refresh, or None (no remote refreshes)."""
+        return None
 
     def _list_running(self) -> dict:
         command = ["argo", "list", "-n", ARGO_NAMESPACE, "--running", "-o", "json"]
@@ -1064,16 +1006,6 @@ def admin_spec() -> dict:
         "templates": {
             "fst_backfill": DEFAULT_FST_BACKFILL_TEMPLATE,
             "ulrpm_orchestrator": DEFAULT_ULRPM_ORCHESTRATOR_TEMPLATE,
-            "fullrlbl_test": DEFAULT_FULLRLBL_TEST_TEMPLATE,
-        },
-        "fullrlbl_test": {
-            "default_fst_namespace": DEFAULT_DEV_NAMESPACE,
-            "default_lst_namespace": "severity-relabel-dev-ulrpm",
-            "default_feature_fetch_mode": "legacy",
-            "default_test_mode": "fetch_only",
-            "default_memory_mb": 8192,
-            "outerbounds_url": OUTERBOUNDS_FULLRLBL_TEST_URL,
-            "template_name": DEFAULT_FULLRLBL_TEST_TEMPLATE,
         },
         "params": [
             {
@@ -1211,8 +1143,6 @@ def _looks_like_fst_backfill(name: str, labels: dict) -> bool:
         "fstbackfill" in haystack
         or "fst-backfill" in haystack
         or "fst_backfill" in haystack
-        or "fullrlbldevfsttest" in haystack
-        or "fullrlbl-dev-fst-test" in haystack
     )
 
 

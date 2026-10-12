@@ -50,5 +50,7 @@ export interface StatusPayload {
   scan_state: ScanState;
   snapshot: DashboardSnapshot;
   data_sources?: { features_source?: FeaturesSourceStatus; [key: string]: unknown };
+  /** Durable scan snapshot (backend scan_snapshot_store): where it lives and whether it was restored. */
+  persistence?: { store?: string; saved_at?: string | null; loaded_from?: string | null; saved_to?: string | null; loading?: boolean };
 }
 export type Tab = "monitor" | "admin" | "sandbox";

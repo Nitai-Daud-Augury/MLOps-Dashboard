@@ -26,7 +26,7 @@ on:
           - trigger
           - terminate
       flow:
-        description: Flow (FSTBackfill, UlrpmDevBackfillOrchestratorFlow, FullRlblDevFstTestFlow); empty = all for list_runs
+        description: Flow (FSTBackfill, UlrpmDevBackfillOrchestratorFlow); empty = all for list_runs
         type: string
         required: false
         default: ''
@@ -82,12 +82,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          # Reuse downloaded wheels between dispatches; the key is the pinned requirements file,
+          # so a pin change starts a new cache. Workflow runs only on workflow_dispatch from main.
+          cache: pip
+          cache-dependency-path: .github/ob-dispatch-requirements.txt
 
       - name: Install Outerbounds (pinned to the app's versions)
-        # outerbounds 0.12.39 pins ob-metaflow==2.19.34.1 and ob-metaflow-extensions==1.6.24.
-        # Do not install the OSS `metaflow` package: it would overwrite ob-metaflow's module.
+        # .github/ob-dispatch-requirements.txt: outerbounds 0.12.39 pins ob-metaflow==2.19.34.1 and
+        # ob-metaflow-extensions==1.6.24. Never the OSS `metaflow` package (it overwrites ob-metaflow).
         run: |
-          python -m pip install --quiet 'outerbounds[azure]==0.12.39' 'ob-metaflow==2.19.34.1' 'ob-metaflow-extensions==1.6.24'
+          python -m pip install --quiet -r .github/ob-dispatch-requirements.txt
           python -c "import importlib.metadata as m; print({p: m.version(p) for p in ('outerbounds', 'ob-metaflow', 'ob-metaflow-extensions')})"
 
       - name: Outerbounds login (OIDC machine user)
@@ -111,7 +115,7 @@ jobs:
           OB_RUN_ID: ${{ inputs.run_id }}
           OB_REQUEST_ID: ${{ inputs.request_id }}
           # Deployment allowlist: the repository variable overrides this default (the dev/test
-          # deployments set in app.yaml). Add the FullRlbl test deployment here once it is known.
+          # deployments set in app.yaml).
           OB_DISPATCH_DEPLOYMENTS: ${{ vars.OB_DISPATCH_DEPLOYMENTS || 'fstbackfill.test.devfstmon.fstbackfill-mrqqu,fstbkfill.test.devfstm.ulrpmdeatorflow-hwqbr' }}
           OB_DISPATCH_ALLOW_PROD: ${{ vars.OB_DISPATCH_ALLOW_PROD }}
           OB_DISPATCH_INCLUDE_PARAMS: ${{ vars.OB_DISPATCH_INCLUDE_PARAMS }}

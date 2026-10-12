@@ -14,7 +14,7 @@ start a shared app until those owners approve the target workspace and costs.
   Outerbounds as the OIDC machine user `mlops-dashboard-sp`. `GITHUB_DISPATCH_TOKEN` is bound from
   secret `mlops-dashboard/github_dispatch_token`; if the token is missing every action answers
   **HTTP 503** `github_dispatch_not_configured` naming both options. Triggers use the
-  `OUTERBOUNDS_*_DEPLOYMENT_ID` env vars in `app.yaml` (dev/test deployments; FullRlbl not set yet). The in-app Metaflow client backend (section 4e) remains available with
+  `OUTERBOUNDS_*_DEPLOYMENT_ID` env vars in `app.yaml` (dev/test deployments). The in-app Metaflow client backend (section 4e) remains available with
   `OUTERBOUNDS_DISPATCH_BACKEND=metaflow` and a service-principal key (static machine-user keys were
   rejected with 403). Docker has no workflow backend (403). Scanning reads FST; lifecycle enrichment is
   selected by `LIFECYCLE_SOURCE` (`databricks` in the deployed app manifest, `mongo` by default
@@ -382,7 +382,7 @@ client in a short-lived child process (same interpreter/isolation approach as th
 
 | Action | Databricks (Metaflow client) | Local (unchanged) |
 |---|---|---|
-| Trigger FSTBackfill / ULRPM orchestrator / FullRlbl test | `DeployedFlow.from_deployment(<deployment id>).trigger(**params)`; parameters are derived from the exact `argo submit -p` list the local builder makes | `argo submit --from workflowtemplate/...` |
+| Trigger FSTBackfill / ULRPM orchestrator | `DeployedFlow.from_deployment(<deployment id>).trigger(**params)`; parameters are derived from the exact `argo submit -p` list the local builder makes | `argo submit --from workflowtemplate/...` |
 | Live status / Running / Overview | `Flow(<flow>).runs()` + per-run Argo phase via the Metaflow Argo client (falls back to the Metaflow run state) | `argo list` / `argo get` |
 | Stop a run | `DeployedFlow.get_triggered_run(<deployment id>, "argo-<id>").terminate()` | `argo terminate` |
 | Stop all runs in a namespace | not supported (501) | `bx_scripts.argo_handler` |
@@ -424,8 +424,7 @@ mismatch -> 409, bad parameters -> 422, timeout -> 504, other Metaflow/Outerboun
 3. Uncomment the block in `app.yaml` (env `METAFLOW_SERVICE_AUTH_KEY` / `OBP_METAFLOW_CONFIG_URL`
    with `valueFrom`) and set the deployment ids (Argo WorkflowTemplate names, i.e. what
    `argo-workflows create` printed / `argo template list` shows):
-   `OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID`, `OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID`,
-   `OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID`. Prod shares `app.yaml`: if prod must point at
+   `OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID` and `OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID`. Prod shares `app.yaml`: if prod must point at
    different deployments, give the prod target its own values before deploying it.
 4. Outerbounds side (owner): the SP needs, in perimeter `default`, read on the metadata service
    (runs/tasks/logs), read on the deployed workflow templates and workflows, and permission to
@@ -472,9 +471,11 @@ workflow: checkout -> mask parameter values -> setup-python 3.11
 
 | Action | GitHub Actions backend |
 |---|---|
-| Trigger (FSTBackfill / ULRPM orchestrator / FullRlbl test) | `action=trigger`, the same parameters as `argo submit`; the workflow checks the deployment's flow, declared parameters and the orchestrator contract before `DeployedFlow.trigger` |
+| Trigger (FSTBackfill / ULRPM orchestrator) | `action=trigger`, the same parameters as `argo submit`; the workflow checks the deployment's flow, declared parameters and the orchestrator contract before `DeployedFlow.trigger` |
 | Stop one run | `action=terminate` with the configured deployment ids (`OB_TERMINATE_AUTHORIZE_TOKEN` repository secret if the deployment belongs to another user) |
-| Live status | cached `action=list_runs` snapshots, refreshed in the background at most every `OUTERBOUNDS_GHA_STATUS_TTL_SECONDS` (default 300); never blocks a request |
+| Live status | `action=list_runs` snapshots fetched **on demand only**: an explicit Refresh in Live Operations / the machine Running tab, or one refresh when a trigger/terminate dispatch completes (the app learns that from its 5s poll of that one dispatch run). No background or websocket-triggered refresh; the websocket only pushes changes. At most one status run in flight (concurrent requests join it); Refresh is limited per user (`WORKFLOW_STATUS_REFRESH_USER_COOLDOWN_SECONDS`, 60) and globally (`WORKFLOW_STATUS_REFRESH_COOLDOWN_SECONDS`, 60, counted from the last start or completion). A limited Refresh returns the cached snapshot with `retry_after`; the UI shows "Retry in Ns". A completion event inside the global cooldown schedules one deferred refresh. After an app restart the status list is empty until the first Refresh or dispatch |
+| After a trigger | Live Operations and the machine view show the dashboard's own record at once as a pending row (`Queued` → `Dispatching` → `Submitted`, with the GitHub run link), from app records only (never the public artifact), until a status snapshot contains the run. Pending rows expire after `OUTERBOUNDS_PENDING_WINDOW_SECONDS` (1800) |
+| Workflow install | `.github/ob-dispatch-requirements.txt` pins the packages and keys the `actions/setup-python` pip cache |
 | Logs, Create Workflow, namespace-wide stop, campaign dispatch | not supported (logs would be public; campaigns lack Argo-level idempotency) |
 
 **Idempotency.** `request_id = <op>-sha256(pending admin action id | op | payload)[:24]`. The pending
@@ -485,7 +486,7 @@ All existing guards (cancel window, duplicate submit, month reservations, strict
 same-machine chunks) run before the child starts, exactly as on the argo path.
 
 **Timeouts.** Run must appear within `GITHUB_DISPATCH_FIND_SECONDS` (120) and finish within
-`GITHUB_DISPATCH_TIMEOUT_SECONDS` (1200); poll every `GITHUB_DISPATCH_POLL_SECONDS` (10).
+`GITHUB_DISPATCH_TIMEOUT_SECONDS` (1200); poll every `GITHUB_DISPATCH_POLL_SECONDS` (5).
 Errors: 503 `github_dispatch_not_configured`, 502 `github_http_<code>` / `github_result_missing`,
 504 `github_dispatch_timeout`, 422 `github_dispatch_payload_too_large` (GitHub caps dispatch inputs
 at 65,535 characters; very large sub-month plans must be split).
@@ -530,7 +531,6 @@ manual Actions-tab dispatch cannot hit production), `OB_DISPATCH_INCLUDE_PARAMS=
    |---|---|---|
    | `OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID` | `fstbackfill.test.devfstmon.fstbackfill-mrqqu` | FSTBackfill, project branch `test` |
    | `OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID` | `fstbkfill.test.devfstm.ulrpmdeatorflow-hwqbr` | UlrpmDevBackfillOrchestratorFlow, branch `test` |
-   | `OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID` | not set | FullRlblDevFstTestFlow; its trigger reports "deployment id not configured" |
 
    The dispatch workflow only accepts deployment ids in `OB_DISPATCH_DEPLOYMENTS`: the repository
    variable if set, otherwise the default in `outerbounds-dispatch.yml`, which lists exactly the ids
@@ -546,6 +546,24 @@ manual Actions-tab dispatch cannot hit production), `OB_DISPATCH_INCLUDE_PARAMS=
 5. Verify: Admin > Outerbounds probe, stage **GitHub Actions dispatch** (read-only token/workflow
    check). With `OUTERBOUNDS_PROBE_GHA_DISPATCH=1` and *Include GitHub Actions dispatch* it runs
    `action=list_runs` end to end.
+
+### 4f2. Scan results persistence (`SCAN_SNAPSHOT_STORE`)
+
+After every successful scan the snapshot is saved, in a versioned envelope
+(`format: mlops-dashboard-scan-snapshot`, `version: 1`), and it is restored when the app starts, so the
+Monitor shows the last results ("Last scanned at … (restored after restart)") without rescanning; Rescan
+stays manual.
+
+| `SCAN_SNAPSHOT_STORE` | Where | Default when |
+|---|---|---|
+| `azure_blob` | `aifleetmlopsfstbackfill/fst-backfill/dashboard-control/_scan/latest_scan_snapshot.v1.json.gz` (gzip JSON; account/container from `FST_BACKFILL_ACCOUNT_NAME` / `FST_BACKFILL_CONTAINER_NAME`) using the same credential as the control store (section 4g: `FST_BACKFILL_SAS_TOKEN`, needs read + write on the container) | Databricks Apps with `BACKFILL_CONTROL_STORE=azure_blob` (the default) |
+| `local` | `ulrpm_scan_snapshot.v1.json.gz` next to `BACKFILL_DASHBOARD_STATE_PATH` (lost on an Apps restart) | elsewhere; also the fallback when a blob write fails |
+| `off` | disabled | explicit |
+
+A file whose format or version does not match, or that is malformed, is ignored and logged
+(`[scan-snapshot] ignored …`), and the dashboard shows "no scan yet" until the next scan. The blob is
+private; machine ids are fine there and never go to the public GitHub artifacts. Logs say where a
+snapshot was saved/loaded (`[scan-snapshot] saved N machines to …`) and never print credentials.
 
 ### 4g. Backfill manifest + control-store credential (`FST_BACKFILL_SAS_TOKEN`)
 

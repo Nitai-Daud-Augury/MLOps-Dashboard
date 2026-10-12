@@ -1,0 +1,6 @@
+# Pinned dependencies of .github/workflows/outerbounds-dispatch.yml (also the pip cache key).
+# outerbounds 0.12.39 pins ob-metaflow==2.19.34.1 and ob-metaflow-extensions==1.6.24 (the app's versions).
+# Do not add the OSS `metaflow` package: it would overwrite ob-metaflow's module.
+outerbounds[azure]==0.12.39
+ob-metaflow==2.19.34.1
+ob-metaflow-extensions==1.6.24

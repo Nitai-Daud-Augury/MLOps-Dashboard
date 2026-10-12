@@ -377,7 +377,7 @@ def run_action(
     log = log or (lambda message: None)
     total = float(timeout or _int_env("GITHUB_DISPATCH_TIMEOUT_SECONDS", 1200, 60, 3600, environ))
     find_window = float(_int_env("GITHUB_DISPATCH_FIND_SECONDS", 120, 15, 600, environ))
-    poll = float(_int_env("GITHUB_DISPATCH_POLL_SECONDS", 10, 1, 60, environ))
+    poll = float(_int_env("GITHUB_DISPATCH_POLL_SECONDS", 5, 1, 60, environ))
     lookback = _int_env("GITHUB_DISPATCH_LOOKBACK_HOURS", 72, 1, 24 * 30, environ)
     started = clock()
 
