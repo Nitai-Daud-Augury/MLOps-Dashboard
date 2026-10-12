@@ -5,8 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 POLL_TS = ROOT / "src" / "features" / "backfill" / "adminActionPoll.ts"
-HOOK_TS = ROOT / "src" / "features" / "backfill" / "useOrchestratedBackfillSubmission.ts"
-APP_TSX = ROOT / "src" / "App.tsx"
+BACKFILL_TSX = ROOT / "src" / "pages" / "admin" / "BackfillPage.tsx"
+SRC = ROOT / "src"
 APP_PY = ROOT / "backend" / "backfill_dashboard" / "app.py"
 
 
@@ -36,15 +36,13 @@ def test_backoff_helper_steps_up() -> None:
     assert next_delay(180_000) == 10_000
 
 
-def test_hook_and_app_no_longer_use_1s_action_poll() -> None:
-    hook = HOOK_TS.read_text(encoding="utf-8")
-    app = APP_TSX.read_text(encoding="utf-8")
-    assert "startAdminActionPoll" in hook
-    assert "setTimeout(() => void poll(), 1000)" not in hook
-    assert "setTimeout(() => void poll(), 1000)" not in app
-    assert "startAdminActionPoll" in app
-    # Machine panel must not keep a duplicate local submissionAction poller.
-    assert app.count("startAdminActionPoll(") == 1
+def test_backfill_page_uses_the_single_flight_poller_once() -> None:
+    page = BACKFILL_TSX.read_text(encoding="utf-8")
+    assert "startAdminActionPoll(" in page
+    assert "setTimeout(() => void poll(), 1000)" not in page
+    # Exactly one poller in the whole UI (no duplicate per-panel submission pollers).
+    calls = sum(path.read_text(encoding="utf-8").count("startAdminActionPoll(") for path in SRC.rglob("*.tsx"))
+    assert calls == 1
 
 
 def test_access_log_filter_suppresses_hot_path() -> None:

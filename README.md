@@ -85,7 +85,7 @@ to keep the synchronous upload bounded; select fewer gap months when the cap is 
 
 ## Repository layout
 
-- `src/`: React UI, dashboard and machine views, backfill controls, API types.
+- `src/`: React UI (Monitoring `/monitor/*` and Admin `/admin/*` route trees; see `docs/UI.md`, which also lists the UI features deferred to future work).
 - `backend/backfill_dashboard/`: FastAPI routes, scanner, lifecycle and coverage normalization,
   storage providers, and control plane.
 - `backend/tests/`: backend and packaging regression tests.

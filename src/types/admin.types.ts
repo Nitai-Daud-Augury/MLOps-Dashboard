@@ -15,16 +15,6 @@ export interface RuntimeInfo {
   workflow_mutations_error?: string | null;
   workflow_mutations_error_type?: string | null;
 }
-export type AdminView =
-  | "overview"
-  | "backfill"
-  | "campaigns"
-  | "operations"
-  | "reviews"
-  | "cost"
-  | "advanced"
-  | "observability"
-  | "diagnostics";
 export interface AdminSpec {
   runtime?: RuntimeInfo;
   default_local_flow_path: string;
@@ -79,10 +69,24 @@ export interface AdminReadiness {
   manifest_storage: AdminReadinessCheck;
   argo: AdminReadinessCheck;
 }
-export interface Toast {
-  id: string;
-  type: "success" | "error" | "info";
-  message: string;
-  timestamp: number;
-  exiting?: boolean;
+/** Params sent with orchestrated backfills and terminate requests (backend TriggerParams / StopParams). */
+export interface TriggerParams {
+  environment: EnvironmentTarget;
+  namespace: string;
+  storage_account_manifest_path: string;
+  include_features_to_backfill: boolean;
+  features_to_backfill: string[];
+  max_parallel_steps: number;
+  force_sessions_from_bucket: boolean;
+  confirm_production: boolean;
+  confirmation_text: string;
+}
+export interface ManifestResult {
+  account_name: string;
+  container_name: string;
+  manifest_path: string;
+  manifest_prefix?: string;
+  rows: number;
+  manifest_count?: number;
+  blob_url: string;
 }
