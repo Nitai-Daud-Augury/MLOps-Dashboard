@@ -1,12 +1,5 @@
 import type { BackfillStatus, MonthStatus } from "./backfill.types";
 
-export type MachineView =
-  | "overview"
-  | "features"
-  | "backfill"
-  | "running"
-  | "history"
-  | "observability";
 export interface MachineStatus {
   machine_id: string;
   display_name?: string;

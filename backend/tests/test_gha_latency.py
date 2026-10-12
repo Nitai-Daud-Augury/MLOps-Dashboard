@@ -238,20 +238,25 @@ def test_local_argo_backend_gets_no_pending_rows(monkeypatch):
 def test_live_ops_ui_renders_pending_rows_without_a_stop_button_before_a_workflow_id():
     from pathlib import Path
 
-    app = (Path(__file__).resolve().parents[2] / "src" / "App.tsx").read_text(encoding="utf-8")
-    assert "workflow-card-pending" in app and "workflow.pending_detail" in app
-    assert "workflow.pending && workflow.workflow_id.startsWith('pending-') ? null : <button" in app
+    src = Path(__file__).resolve().parents[2] / "src"
+    table = (src / "features" / "workflows" / "WorkflowTable.tsx").read_text(encoding="utf-8")
+    assert "pending-row" in table and "workflow.pending_detail" in table and "github_run_url" in table
+    ops = (src / "pages" / "admin" / "OperationsPage.tsx").read_text(encoding="utf-8")
+    assert "w.pending && w.workflow_id.startsWith('pending-') ? <span" in ops
 
 
 def test_ui_fetches_status_only_on_refresh_or_push():
     from pathlib import Path
 
     src = Path(__file__).resolve().parents[2] / "src"
-    app = (src / "App.tsx").read_text(encoding="utf-8")
-    runs = app[app.index("function MachineRuns("):app.index("function MachineTaskLogs(")]
-    assert "setInterval" not in runs and "15_000)" not in runs.replace("15_000, true)", "")  # no machine-tab polling
-    assert "postWorkflowRefresh()" in runs and "disabled={fetching || retryIn > 0}" in runs
-    assert "onClick={() => void refreshWorkflowStatus()}" in app and "disabled={statusFetching || statusRetryIn > 0}" in app
-    assert "Retry in {statusRetryIn}s" in app and "Fetching status…" in app
+    hook = (src / "features" / "workflows" / "useWorkflowSummary.ts").read_text(encoding="utf-8")
+    assert "setInterval" not in hook and "postWorkflowRefresh()" in hook and "useWorkflowLiveSocket" in hook
+    for page in ("pages/monitor/LivePage.tsx", "pages/monitor/MachinePage.tsx", "pages/admin/OperationsPage.tsx"):
+        text = (src / page).read_text(encoding="utf-8")
+        assert "setInterval" not in text, page
+        assert "retryIn={summary.retryIn}" in text and "fetching={summary.fetching}" in text, page
+    button = (src / "components" / "ui" / "index.tsx").read_text(encoding="utf-8")
+    assert "disabled={fetching || retryIn > 0}" in button and "`Retry in ${retryIn}s`" in button and "'Refreshing…'" in button
     helper = (src / "features" / "workflows" / "workflowStatusRefresh.ts").read_text(encoding="utf-8")
     assert "/api/admin/workflows/refresh" in helper and "method: 'POST'" in helper
+

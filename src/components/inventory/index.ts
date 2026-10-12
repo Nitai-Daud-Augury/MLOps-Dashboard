@@ -1,1 +1,0 @@
-export { InventoryPanel } from './InventoryPanel';

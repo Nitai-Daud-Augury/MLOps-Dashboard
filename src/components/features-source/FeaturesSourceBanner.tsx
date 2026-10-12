@@ -1,16 +1,17 @@
-import { AlertTriangle, ChevronDown, ChevronUp, Info, X } from 'lucide-react';
+import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useState } from 'react';
-
-import { SOURCE_NAMES, type FeaturesSourceStatus } from './featuresSourceApi';
+import { Banner } from '../ui';
+import { useStatus } from '../../state/statusStore';
+import { SOURCE_NAMES } from './featuresSourceApi';
 
 /**
- * Persistent mismatch banner + databricks-mode notes (shown on every tab).
- * - Rescan required: can be collapsed to one line but never hidden while it is
- *   still relevant; it re-expands when the mismatch changes (new switch or scan).
- * - Databricks note / not-durable note: dismissible; they come back after the
- *   next switch.
+ * Rescan-required banner (results from another source): collapsible but never hidden while
+ * relevant; re-expands when the mismatch changes. Databricks / not-durable notes dismiss
+ * until the next switch.
  */
-export function FeaturesSourceBanner({ status, onRescan }: { status: FeaturesSourceStatus | null | undefined; onRescan: () => void | Promise<void> }) {
+export function FeaturesSourceBanner() {
+  const { payload, startScan, scanRequesting } = useStatus();
+  const status = payload?.data_sources?.features_source;
   const [collapsedKey, setCollapsedKey] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<Record<string, string>>({});
   if (!status) return null;
@@ -19,41 +20,27 @@ export function FeaturesSourceBanner({ status, onRescan }: { status: FeaturesSou
   const collapsed = collapsedKey === mismatchKey;
   const switchKey = `${active}|${status.updated_at ?? ''}`;
   const notDurable = status.origin === 'switched' && status.persistence?.durable === false;
-  const showNote = active === 'databricks' && dismissed.note !== switchKey;
-  const showDurable = notDurable && dismissed.durable !== switchKey;
-  const dismiss = (name: string) => setDismissed((current) => ({ ...current, [name]: switchKey }));
+  const running = status.scan_running || Boolean(payload?.scan_state.running);
   return <>
     {status.mismatch && status.results_source ? (
-      <section className={`notice features-source-banner${collapsed ? ' collapsed' : ''}`} role="status">
-        <AlertTriangle size={17} />
-        <span>
-          <strong>Results were scanned from {SOURCE_NAMES[status.results_source]}; source is now {SOURCE_NAMES[active]} — rescan required.</strong>
-          {!collapsed && status.results_source_inferred ? ' (Results predate the source switch and were read from blob.)' : ''}
-        </span>
-        <div className="notice-actions">
-          <button className="primary-button" type="button" onClick={() => void onRescan()} disabled={status.scan_running}>
-            <span>{status.scan_running ? 'Scan running…' : 'Rescan now'}</span>
-          </button>
-          <button className="notice-dismiss" type="button" onClick={() => setCollapsedKey(collapsed ? null : mismatchKey)}
-            aria-label={collapsed ? 'Expand rescan warning' : 'Collapse rescan warning'} title={collapsed ? 'Expand' : 'Collapse'}>
-            {collapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
-          </button>
-        </div>
-      </section>
+      <Banner tone="warn" title={`Results were scanned from ${SOURCE_NAMES[status.results_source]}; source is now ${SOURCE_NAMES[active]} — rescan required.`}
+        actions={<>
+          <button type="button" className="btn btn-primary" onClick={() => void startScan()} disabled={running || scanRequesting}>{running ? 'Scan running…' : 'Rescan now'}</button>
+          <button type="button" className="icon-btn" onClick={() => setCollapsedKey(collapsed ? null : mismatchKey)} aria-label={collapsed ? 'Expand rescan warning' : 'Collapse rescan warning'}>
+            {collapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}</button>
+        </>}>
+        {collapsed ? null : status.results_source_inferred ? 'The results predate the source switch and were read from blob.' : 'The table below still shows the previous source until a scan completes.'}
+      </Banner>
     ) : null}
-    {showNote ? (
-      <section className="notice features-source-note" role="note">
-        <Info size={17} />
-        <span><strong>Reading from Databricks feature_store.</strong> The Databricks copy may be stale for older backfilled months (bronze ingests only the current and previous month), and the schema completeness check is unavailable.</span>
-        <button className="notice-dismiss" type="button" onClick={() => dismiss('note')} aria-label="Dismiss Databricks note" title="Dismiss"><X size={16} /></button>
-      </section>
+    {active === 'databricks' && dismissed.note !== switchKey ? (
+      <Banner tone="info" title="Reading from Databricks feature_store." onDismiss={() => setDismissed((d) => ({ ...d, note: switchKey }))}>
+        The copy may be stale for older backfilled months (bronze ingests only the current and previous month), and the schema completeness check is unavailable.
+      </Banner>
     ) : null}
-    {showDurable ? (
-      <section className="notice features-source-note" role="note">
-        <Info size={17} />
-        <span>The source switch could not be saved to the control store ({status.persistence.error ?? 'unavailable'}); it applies until the app restarts, then the default ({SOURCE_NAMES[status.default]}) returns.</span>
-        <button className="notice-dismiss" type="button" onClick={() => dismiss('durable')} aria-label="Dismiss not-saved note" title="Dismiss"><X size={16} /></button>
-      </section>
+    {notDurable && dismissed.durable !== switchKey ? (
+      <Banner tone="warn" title="Source switch not saved durably." onDismiss={() => setDismissed((d) => ({ ...d, durable: switchKey }))}>
+        Control store unavailable ({status.persistence.error ?? 'unknown error'}); the switch applies until the app restarts, then the default ({SOURCE_NAMES[status.default]}) returns.
+      </Banner>
     ) : null}
   </>;
 }
