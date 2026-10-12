@@ -11,9 +11,9 @@ OIDC machine user ``mlops-dashboard-sp`` and runs ``scripts/ob_dispatch.py``.
               ``action=trigger``. The workflow checks the deployment's flow, its
               declared parameters and (orchestrator) the contract version.
 * terminate - ``action=terminate`` with the configured deployment ids.
-* status    - ``action=list_runs`` snapshots, cached (OUTERBOUNDS_GHA_STATUS_TTL_SECONDS,
-              default 300) and refreshed in the background: a GitHub run takes
-              minutes, so status requests never block on it.
+* status    - ``action=list_runs`` snapshots, fetched ON DEMAND only (an explicit Refresh,
+              rate limited, or a dispatch completion event; see status_refresh.py).
+              Reads never dispatch and never block on a GitHub run.
 * logs/create - not supported (open Outerbounds).
 
 Triggers and terminates run as admin-action children
@@ -39,7 +39,6 @@ from typing import Any, Callable, Mapping
 from . import github_dispatch as gha
 from . import outerbounds_probe as probe
 from .admin import (
-    FullRlblTestParams,
     LogLookupParams,
     OUTERBOUNDS_RUNS_URL,
     RunningWorkflowProvider,
@@ -69,7 +68,6 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 KIND_FLOWS = {
     "fst_backfill": "FSTBackfill",
     "ulrpm_orchestrator": "UlrpmDevBackfillOrchestratorFlow",
-    "fullrlbl_test": "FullRlblDevFstTestFlow",
 }
 
 
@@ -163,14 +161,6 @@ class GithubActionsCommandBuilder(WorkflowCommandBuilder):
                        f"({ULRPM_ORCHESTRATOR_CONTRACT_VERSION}) before triggering."),
         }
 
-    def fullrlbl_test_readiness(self) -> dict:
-        deployment, problem = self._deployment_readiness("fullrlbl_test")
-        if problem:
-            return problem
-        return {"ready": True, "backend": self.backend, "template_name": deployment,
-                "detail": "FullRlbl test deployment configured; checked by the dispatch workflow at trigger time."}
-
-    # actions
     def validate_cli(self, source: WorkflowSourceRequest) -> dict:
         return {"ready": True, "backend": self.backend,
                 "detail": "No flow source is needed on Databricks: actions trigger the deployed template via GitHub Actions."}
@@ -197,10 +187,6 @@ class GithubActionsCommandBuilder(WorkflowCommandBuilder):
     def build_ulrpm_orchestrator_trigger(self, **kwargs: Any) -> tuple[Path, list[str]]:
         _, argo_command = super().build_ulrpm_orchestrator_trigger(**kwargs)
         return self._trigger_command("ulrpm_orchestrator", argo_command)
-
-    def build_fullrlbl_test_trigger(self, params: FullRlblTestParams) -> tuple[Path, list[str]]:
-        _, argo_command = super().build_fullrlbl_test_trigger(params)
-        return self._trigger_command("fullrlbl_test", argo_command)
 
     def build_terminate(self, params: TerminateParams) -> tuple[Path, list[str]]:
         super().build_terminate(params)  # identical validation (prod confirmation, id format); builds nothing here
@@ -241,39 +227,68 @@ _TERMINAL = {"succeeded", "completed", "failed", "error", "terminated"}
 
 
 class GithubActionsRunningWorkflowProvider(RunningWorkflowProvider):
-    """Workflow status via cached GitHub Actions ``list_runs`` snapshots (never blocks on a run)."""
+    """Workflow status via GitHub Actions ``list_runs`` snapshots, refreshed ON DEMAND only.
+
+    Every refresh is a full GitHub Actions run, so nothing here refreshes by itself: reads
+    return the last snapshot (or nothing yet), and ``start_refresh`` is called only by
+    status_refresh.StatusRefreshGate (an explicit Refresh click, rate limited, or a dispatch
+    completion event). At most one refresh is in flight; concurrent callers join it.
+    """
 
     def __init__(self, *, environ: Mapping[str, str] | None = None,
                  runner: Callable[..., dict] | None = None, start_thread: Callable[[Callable[[], None]], None] | None = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time) -> None:
         super().__init__()
         self._environ = environ
         self._runner = runner or gha.run_action
         self._start_thread = start_thread or (lambda target: threading.Thread(target=target, name="gha-status", daemon=True).start())
         self._clock = clock
+        self._wall = wall
         self._lock = threading.Lock()
         self._snapshot: dict | None = None
         self._fetched_at: float | None = None
         self._refreshing = False
-
-    @property
-    def ttl(self) -> int:
-        return gha._int_env("OUTERBOUNDS_GHA_STATUS_TTL_SECONDS", 300, 60, 3600, self._environ)
+        self._version = 0
 
     def _check_argo(self) -> bool:
         return github_dispatch_configured(self._environ)
+
+    @property
+    def refreshing(self) -> bool:
+        with self._lock:
+            return self._refreshing
+
+    @property
+    def snapshot_version(self) -> int:
+        with self._lock:
+            return self._version
+
+    def last_completed(self) -> float | None:
+        with self._lock:
+            return self._fetched_at
+
+    def start_refresh(self) -> bool:
+        if not self._check_argo():
+            return False
+        with self._lock:
+            if self._refreshing:
+                return False
+            self._refreshing = True
+            started_at = self._wall()
+        self._start_thread(lambda: self._refresh(started_at))
+        return True
 
     def _unavailable(self) -> dict:
         return {"workflows": [], "counts": {}, "argo_available": False, "workflow_backend": BACKEND,
                 "error_type": GITHUB_DISPATCH_NOT_CONFIGURED, "hint": github_dispatch_missing_message(self._environ)}
 
-    def _refresh(self) -> None:
+    def _refresh(self, started_at: float | None = None) -> None:
+        started_at = self._wall() if started_at is None else started_at
         try:
-            ttl = self.ttl
             limit = gha._int_env("OUTERBOUNDS_STATUS_RUN_LIMIT", 20, 1, 100, self._environ)
-            # Same bucket -> same request_id: concurrent refreshes (or app replicas) share one GitHub run.
-            bucket = int(time.time() // ttl)
-            request_id = gha.request_id_for("list_runs", {"limit": limit, "bucket": bucket})
+            # Unique per refresh (refreshes are >= the global cooldown apart, see status_refresh);
+            # a retry of the same refresh reuses its GitHub run instead of dispatching again.
+            request_id = gha.request_id_for("list_runs", {"limit": limit, "started": int(started_at)})
             inputs = gha.build_inputs("list_runs", request_id, params={"limit": limit})
             result = self._runner("list_runs", request_id, inputs, environ=self._environ,
                                   timeout=gha._int_env("OUTERBOUNDS_GHA_STATUS_TIMEOUT_SECONDS", 600, 60, 1800, self._environ))
@@ -298,32 +313,26 @@ class GithubActionsRunningWorkflowProvider(RunningWorkflowProvider):
             self._snapshot = snapshot
             self._fetched_at = self._clock()
             self._refreshing = False
-
-    def _ensure_fresh(self) -> None:
-        with self._lock:
-            stale = self._fetched_at is None or self._clock() - self._fetched_at > self.ttl
-            if not stale or self._refreshing:
-                return
-            self._refreshing = True
-        self._start_thread(self._refresh)
+            self._version += 1
 
     def _query(self, running_only: bool) -> dict:
         if not self._check_argo():
             return self._unavailable()
-        self._ensure_fresh()
         with self._lock:
             snapshot = dict(self._snapshot or {})
             refreshing = self._refreshing
+            version = self._version
         payload: dict[str, Any] = {"argo_available": True, "workflow_backend": BACKEND, "outerbounds_url": OUTERBOUNDS_RUNS_URL,
                                    "refreshing": refreshing, "fetched_at": snapshot.get("fetched_at"),
-                                   "github_run_url": snapshot.get("github_run_url")}
+                                   "snapshot_version": version, "github_run_url": snapshot.get("github_run_url")}
         warnings = list(snapshot.get("warnings") or [])
-        warnings.append(f"Status comes from GitHub Actions snapshots (refreshed at most every {self.ttl}s); "
-                        "it can lag the Outerbounds UI by a few minutes.")
+        warnings.append("Status comes from GitHub Actions snapshots fetched on Refresh or after a dispatch completes; "
+                        "it can lag the Outerbounds UI.")
         if snapshot.get("workflows") is None:
             payload.update(workflows=[], error=snapshot.get("error"), error_type=snapshot.get("error_type"))
             if not snapshot.get("error"):
-                warnings.append("Fetching status through GitHub Actions (first snapshot takes ~2-4 minutes).")
+                warnings.append("Fetching status through GitHub Actions (about 1-2 minutes)." if refreshing
+                                else "No status fetched yet: click Refresh (one GitHub Actions run, about 1-2 minutes).")
         else:
             workflows = list(snapshot["workflows"])
             if running_only:
@@ -336,6 +345,14 @@ class GithubActionsRunningWorkflowProvider(RunningWorkflowProvider):
         payload["warnings"] = warnings
         return payload
 
+    # Reads are in-memory: bypass the base class's short TTL cache so a finished refresh
+    # is visible at once.
+    def list_running(self) -> dict:
+        return self._query(running_only=True)
+
+    def list_recent(self) -> dict:
+        return self._query(running_only=False)
+
     def _list_running(self) -> dict:
         return self._query(running_only=True)
 
@@ -347,7 +364,6 @@ class GithubActionsRunningWorkflowProvider(RunningWorkflowProvider):
         ids = {item for item in ids if re.fullmatch(r"[A-Za-z0-9_.-]{3,253}", item)}
         if not ids or not self._check_argo():
             return []
-        self._ensure_fresh()
         with self._lock:
             workflows = list((self._snapshot or {}).get("workflows") or [])
         # Same contract as the CLI path: absent/unknown never changes stored state.

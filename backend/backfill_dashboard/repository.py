@@ -23,12 +23,37 @@ def _format_elapsed(seconds: float) -> str:
 
 
 class ReportRepository:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, snapshot_store=None, load_in_background: bool = True) -> None:
         self.settings = settings
         self._lock = threading.Lock()
         self._scan_state = ScanState(running=False)
         self._latest: dict | None = self._load_latest()
         self._cancellations: dict[str, threading.Event] = {}
+        # Durable copy (scan_snapshot_store.ScanSnapshotStore): loaded at start so results
+        # appear without rescanning, saved after every successful scan.
+        self._snapshot_store = snapshot_store
+        self._persistence: dict = {"store": snapshot_store.describe() if snapshot_store else "off",
+                                   "saved_at": None, "loaded_from": None, "loading": snapshot_store is not None}
+        if snapshot_store is not None:
+            if load_in_background:
+                threading.Thread(target=self.load_saved_snapshot, name="scan-snapshot-load", daemon=True).start()
+            else:
+                self.load_saved_snapshot()
+
+    def load_saved_snapshot(self) -> bool:
+        """Adopt the durable snapshot unless a newer one is already in memory."""
+        loaded = self._snapshot_store.load() if self._snapshot_store else None
+        with self._lock:
+            self._persistence["loading"] = False
+            if not loaded:
+                return False
+            snapshot = loaded["snapshot"]
+            current = self._latest or {}
+            if current and str(current.get("generated_at") or "") >= str(snapshot.get("generated_at") or ""):
+                return False
+            self._latest = self._normalize_machine_urls(snapshot)
+            self._persistence.update(saved_at=loaded["saved_at"], loaded_from=loaded["loaded_from"])
+            return True
 
     @property
     def scan_state(self) -> ScanState:
@@ -43,6 +68,7 @@ class ReportRepository:
                 return {
                     "scan_state": asdict(self._scan_state),
                     "snapshot": self._latest,
+                    "persistence": dict(self._persistence),
                 }
         snapshot = DashboardSnapshot.empty(
             account=self._scan_state.source_account or self.settings.fst_account,
@@ -52,6 +78,7 @@ class ReportRepository:
         return {
             "scan_state": asdict(self._scan_state),
             "snapshot": asdict(snapshot),
+            "persistence": dict(self._persistence),
         }
 
     def reset_scan(self) -> ScanState:
@@ -128,6 +155,11 @@ class ReportRepository:
                 self._scan_state.phase = "complete"
                 self._persist_latest(payload)
                 self._cancellations.pop(scan_id, None)
+            if self._snapshot_store is not None:
+                where = self._snapshot_store.save(payload)
+                with self._lock:
+                    self._persistence.update(saved_at=datetime.now(timezone.utc).isoformat() if where else None,
+                                             loaded_from=None, saved_to=where)
         except ScanCancelled:
             with self._lock:
                 self._cancellations.pop(scan_id, None)

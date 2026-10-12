@@ -57,7 +57,7 @@ def test_databricks_app_manifest_uses_safe_same_origin_runtime():
     assert "OUTERBOUNDS_PROBE_DEPLOYMENT_ID" not in environment
     assert not any(key in environment for key in ("METAFLOW_SERVICE_AUTH_KEY", "OBP_METAFLOW_CONFIG_URL", "METAFLOW_SERVICE_HEADERS"))
     # Dev/test deployment ids for GitHub Actions dispatch (prod shares this file; runbook 4f).
-    # FullRlbl stays unset until its deployment name is confirmed.
+    # FullRlbl was removed from the dashboard: no deployment id, route or allowlist entry.
     assert environment["OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID"]["value"] == "fstbackfill.test.devfstmon.fstbackfill-mrqqu"
     assert environment["OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID"]["value"] == "fstbkfill.test.devfstm.ulrpmdeatorflow-hwqbr"
     assert "OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID" not in environment
@@ -332,3 +332,14 @@ def test_team_docs_and_plan_are_shareable_and_match_runtime():
     assert "mongodb+srv://" not in combined
     assert "ghp_" not in combined and "dapi" not in combined
     assert "/Users/ndaud/" not in combined
+
+
+def test_fullrlbl_is_removed_everywhere():
+    import re
+
+    root = Path(__file__).resolve().parents[2]
+    paths = [root / "app.yaml", root / ".env.example", root / ".github" / "workflows" / "outerbounds-dispatch.yml",
+             root / "scripts" / "ob_dispatch.py", root / "src" / "App.tsx", root / "docs" / "DEPLOYMENT_RUNBOOK.md",
+             *sorted((root / "backend" / "backfill_dashboard").rglob("*.py")), *sorted((root / "src").rglob("*.ts"))]
+    offenders = [str(path.relative_to(root)) for path in paths if re.search(r"fullrlbl|fullrsttest", path.read_text(encoding="utf-8"), re.I)]
+    assert offenders == []

@@ -7,7 +7,6 @@ from .backfill_schemas import (
     OrchestratedManifestRequest,
     SplitModel,
 )
-from .fullrlbl_schemas import FullRlblTestRequestModel
 from .manifest_schemas import DailyGapManifestRequestModel, MachineManifestRequestModel, MultiMachineManifestRequestModel
 from .workflow_schemas import (
     CreateWorkflowRequest,
@@ -20,7 +19,7 @@ from .workflow_schemas import (
 
 __all__ = [
     "AllMachinesBackfillRequest", "CancelMonthRequest", "CreateWorkflowRequest",
-    "FullRlblTestRequestModel", "LogsRequest", "MachineManifestRequestModel",
+    "LogsRequest", "MachineManifestRequestModel",
     "DailyGapManifestRequestModel",
     "MonthPlanRequest", "MultiMachineManifestRequestModel", "OrchestratedBackfillRequest",
     "OrchestratedManifestRequest", "SplitModel",

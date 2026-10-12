@@ -18,7 +18,6 @@ import pytest
 from backfill_dashboard import outerbounds_actions as actions_module
 from backfill_dashboard.admin import (
     AdminActionRepository,
-    FullRlblTestParams,
     LogLookupParams,
     PROD_CONFIRMATION,
     RunningWorkflowProvider,
@@ -56,7 +55,6 @@ SP_ENV = {
     "OBP_METAFLOW_CONFIG_URL": "https://api.example.invalid/config",
     "OUTERBOUNDS_FSTBACKFILL_DEPLOYMENT_ID": "fstbackfill.prod.fstbackfill",
     "OUTERBOUNDS_ULRPM_ORCHESTRATOR_DEPLOYMENT_ID": "fstbkfill.prod.ulrpmorchestrator",
-    "OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID": "fullrsttest.test.fullrlbl",
 }
 # The Metaflow backend explicitly (without a key the Databricks default is now github_actions).
 NO_SP_ENV = {"MLOPS_DASHBOARD_RUNTIME": "databricks", "DATABRICKS_APP_PORT": "8000", "OUTERBOUNDS_DISPATCH_BACKEND": "metaflow"}
@@ -271,7 +269,6 @@ def test_databricks_without_sp_returns_clear_503_on_every_admin_mutation(monkeyp
         "/api/admin/workflows/trigger",
         "/api/admin/backfills/orchestrated",
         "/api/admin/backfills/all",
-        "/api/admin/fullrlbl/trigger",
         "/api/admin/workflows/terminate",
         "/api/admin/logs",
         "/api/admin/workflows/create",
@@ -286,7 +283,7 @@ def test_databricks_without_sp_returns_clear_503_on_every_admin_mutation(monkeyp
 
     readiness = _request(app_module.app, "GET", "/api/admin/readiness").body
     assert readiness["argo"]["ready"] is False and readiness["argo"]["error_type"] == SP_NOT_CONFIGURED
-    assert readiness["fullrlbl_test"]["error_type"] == SP_NOT_CONFIGURED
+    assert "fullrlbl_test" not in readiness  # FullRlbl was removed
     running = _request(app_module.app, "GET", "/api/admin/workflows/running").body
     assert running["argo_available"] is False and "service principal" in running["hint"]
 
@@ -398,8 +395,7 @@ def test_terminate_scope_create_and_logs_on_databricks():
         builder.build_create(WorkflowSourceRequest())
     _, logs = builder.build_logs(WorkflowSourceRequest(), LogLookupParams(run_task_path="argo-a/start/1", stream="stderr"))
     assert json.loads(logs[-1])["stream"] == "stderr"
-    _, fullrlbl = builder.build_fullrlbl_test_trigger(FullRlblTestParams(machine_ids=[MACHINE]))
-    assert json.loads(fullrlbl[-1])["deployment_id"] == SP_ENV["OUTERBOUNDS_FULLRLBL_TEST_DEPLOYMENT_ID"]
+    assert not hasattr(builder, "build_fullrlbl_test_trigger")
 
 
 def test_trigger_kwargs_coerce_to_declared_types_and_reject_unknown():

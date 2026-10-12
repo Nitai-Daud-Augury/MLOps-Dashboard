@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 import asyncio
+import json
 import os
 import time
 from time import monotonic
@@ -17,8 +18,6 @@ from .admin import (
     DEFAULT_FLOW_PATH,
     DEFAULT_DEV_NAMESPACE,
     OUTERBOUNDS_RUNS_URL,
-    OUTERBOUNDS_FULLRLBL_TEST_URL,
-    FullRlblTestParams,
     LogLookupParams,
     PROD_CONFIRMATION,
     PROD_NAMESPACE,
@@ -63,6 +62,8 @@ from .inventory_models import MachineSearchQuery
 from .scanner import BackfillScanner
 from .outerbounds_costs import current_cost_report
 from . import outerbounds_probe
+from . import pending_runs
+from .status_refresh import StatusRefreshGate, is_dispatch_completion
 from .middleware import register_polling_guard
 from .static_host import LOCAL_VITE_ORIGINS, local_vite_development_enabled, register_static_spa_host
 from .control_plane.inventory_routes import etag_response
@@ -70,7 +71,7 @@ from .control_plane.routes import build_router as build_control_plane_router
 from .control_plane.selection import iter_selection
 from .schemas import (
     AllMachinesBackfillRequest, CancelMonthRequest, CreateWorkflowRequest,
-    FullRlblTestRequestModel, LogsRequest, MachineManifestRequestModel, MonthPlanRequest,
+    LogsRequest, MachineManifestRequestModel, MonthPlanRequest,
     DailyGapManifestRequestModel, MultiMachineManifestRequestModel, OrchestratedBackfillRequest, OrchestratedManifestRequest,
     ScanRequest, TerminateParamsModel,
     TerminateWorkflowRequest, TriggerParamsModel, TriggerWorkflowRequest,
@@ -79,6 +80,17 @@ from .schemas import (
 
 
 RUNTIME_INFO = runtime_info()
+# Workflow status is fetched only on an explicit Refresh (rate limited) or a dispatch
+# completion event; see status_refresh.py.
+status_refresh_gate = StatusRefreshGate(running_workflows)
+
+
+def _refresh_on_dispatch_completion(action: dict) -> None:
+    if is_dispatch_completion(action):
+        status_refresh_gate.request("dispatch-event", reason="event")
+
+
+admin_repository.on_finished.append(_refresh_on_dispatch_completion)
 BACKFILL_CANCEL_WINDOW_SECONDS = 15
 app = FastAPI(title="MLOps Dashboard")
 if local_vite_development_enabled():
@@ -108,7 +120,6 @@ def _workflow_mutation_route(method: str, path: str) -> bool:
         "/api/admin/logs",
         "/api/admin/backfills/all",
         "/api/admin/backfills/orchestrated",
-        "/api/admin/fullrlbl/trigger",
         "/api/v1/backfill-campaigns",
     }
     if path in fixed:
@@ -798,6 +809,14 @@ def list_admin_actions(machine_id: str | None = None) -> dict:
         for workflow_id, workflow in workflows_by_id.items()
         if workflow_id and workflow_id in confirmed_running_workflow_ids
     }
+    if _pending_rows_enabled():
+        # Just-triggered runs the status snapshot has not reported yet stay on the machine's
+        # Running tab (as "Submitted") instead of disappearing until the next snapshot.
+        expected = pending_runs.expected_workflow_ids(actions, list(workflows_by_id), window=pending_runs.window_seconds())
+        for workflow_id in expected:
+            if workflow_id not in confirmed_running_workflow_ids:
+                confirmed_running_workflow_ids.append(workflow_id)
+                live_workflow_statuses[workflow_id] = "Submitted"
     return {
         "actions": actions,
         # A persisted dashboard action is only a submission record. The machine
@@ -805,14 +824,35 @@ def list_admin_actions(machine_id: str | None = None) -> dict:
         # `running` flag, which can survive a lost status lookup.
         "confirmed_running_workflow_ids": confirmed_running_workflow_ids,
         "live_workflow_statuses": live_workflow_statuses,
+        "refresh": status_refresh_gate.status(),
     }
+
+
+def _pending_rows_enabled() -> bool:
+    # The local argo CLI lists a new workflow within seconds; only the remote backends
+    # (GitHub Actions snapshots, Metaflow client) need dashboard-side pending rows.
+    return RUNTIME_INFO.workflow_mutations and RUNTIME_INFO.workflow_backend in {"github_actions", "metaflow"}
+
+
+def _with_pending_dispatches(summary: dict) -> dict:
+    """Prepend dashboard dispatches the status source has not reported yet (instant pending rows)."""
+    if not _pending_rows_enabled():
+        return summary
+    actions = admin_repository.list()
+    known = [str(item.get("workflow_id") or "") for item in summary.get("workflows", [])]
+    window = pending_runs.window_seconds()
+    rows = pending_runs.pending_rows(actions, known, window=window)
+    if rows:
+        summary["workflows"] = rows + list(summary.get("workflows", []))
+        summary["pending_count"] = len(rows)
+    return summary
 
 
 @app.get("/api/admin/workflows/running")
 def list_running_workflows() -> dict:
     if not RUNTIME_INFO.workflow_mutations:
         return {"workflows": [], "argo_available": False, "hint": _monitor_only_workflow_hint()}
-    return running_workflows.list_running()
+    return _with_pending_dispatches(running_workflows.list_running())
 
 
 @app.get("/api/admin/workflows/summary")
@@ -826,6 +866,30 @@ def workflow_summary() -> dict:
     for workflow in summary.get("workflows", []):
         workflow["machine_ids"] = workflow.get("machine_ids") or admin_repository.machine_ids_for_workflow(workflow.get("workflow_id", ""))
     summary["reviewed_workflow_ids"] = workflow_reviews.reviewed_ids()
+    return _with_pending_dispatches(summary)
+
+
+def _request_user(request: Request) -> str:
+    """Databricks Apps forwards the signed-in user; locally fall back to the client address."""
+    for header in ("x-forwarded-email", "x-forwarded-preferred-username", "x-forwarded-user"):
+        value = request.headers.get(header)
+        if value:
+            return value
+    return request.client.host if request.client else "anonymous"
+
+
+@app.post("/api/admin/workflows/refresh")
+def refresh_workflow_status(request: Request) -> dict:
+    """Explicit Refresh: start (or join) one status refresh, rate limited per user and globally.
+
+    Always answers 200 with the cached summary; ``refresh.state`` is started | joined |
+    limited (with ``retry_after`` seconds). Never starts more than one status run.
+    """
+    if not RUNTIME_INFO.workflow_mutations:
+        return {**workflow_summary(), "refresh": {"state": "unavailable", "retry_after": None}}
+    result = status_refresh_gate.request(_request_user(request), reason="manual")
+    summary = workflow_summary()
+    summary["refresh"] = {**status_refresh_gate.status(_request_user(request)), **result}
     return summary
 
 
@@ -840,13 +904,27 @@ async def live_workflow_updates(websocket: WebSocket) -> None:
         await websocket.close(code=1000)
         return
     try:
+        # On the GitHub Actions backend this only PUSHES the in-memory snapshot (it never
+        # starts a status run) and sends only when something changed, e.g. a refresh that a
+        # Refresh click or a dispatch completion started has finished.
+        push_only = RUNTIME_INFO.workflow_backend == "github_actions"
+        last_sent = None
         while True:
             summary = await asyncio.to_thread(running_workflows.list_recent)
             for workflow in summary.get("workflows", []):
                 workflow["machine_ids"] = workflow.get("machine_ids") or admin_repository.machine_ids_for_workflow(workflow.get("workflow_id", ""))
             summary["reviewed_workflow_ids"] = workflow_reviews.reviewed_ids()
-            await websocket.send_json(summary)
-            await asyncio.sleep(5)
+            summary = await asyncio.to_thread(_with_pending_dispatches, summary)
+            if push_only:
+                summary["refresh"] = status_refresh_gate.status()
+                encoded = json.dumps(summary, sort_keys=True, default=str)
+                if encoded != last_sent:
+                    await websocket.send_json(summary)
+                    last_sent = encoded
+                await asyncio.sleep(2)
+            else:
+                await websocket.send_json(summary)
+                await asyncio.sleep(5)
     except WebSocketDisconnect:
         return
 
@@ -874,21 +952,15 @@ def get_admin_readiness() -> dict:
     except Exception as exc:
         manifest_storage = {"ready": False, "detail": str(exc)}
     if RUNTIME_INFO.workflow_mutations:
-        try:
-            fullrlbl_test = command_builder.fullrlbl_test_readiness()
-        except Exception as exc:
-            fullrlbl_test = {"ready": False, "detail": str(exc)}
         argo = command_builder.ulrpm_orchestrator_readiness()
     else:
         unavailable = {"ready": False, "detail": _monitor_only_workflow_hint(),
                        "error_type": RUNTIME_INFO.workflow_mutations_error_type,
                        "backend": RUNTIME_INFO.workflow_backend}
-        fullrlbl_test = dict(unavailable)
         argo = dict(unavailable)
     return {
         "manifest_storage": manifest_storage,
         "argo": argo,
-        "fullrlbl_test": fullrlbl_test,
     }
 
 
@@ -1127,63 +1199,6 @@ def trigger_orchestrated_machine_backfill(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     background_tasks.add_task(_prepare_orchestrated_trigger, action.id, request.model_dump())
     return {"action": asdict(action), "accepted": True}
-
-
-@app.get("/api/admin/fullrlbl/readiness")
-def get_fullrlbl_readiness() -> dict:
-    if not RUNTIME_INFO.workflow_mutations:
-        return {"ready": False, "detail": _monitor_only_workflow_hint(),
-                "error_type": RUNTIME_INFO.workflow_mutations_error_type}
-    return command_builder.fullrlbl_test_readiness()
-
-
-@app.get("/api/admin/fullrlbl/machines")
-def get_fullrlbl_machines() -> dict:
-    return {"machine_ids": scanner.inventory.list_machine_ids()}
-
-
-@app.post("/api/admin/fullrlbl/trigger")
-def trigger_fullrlbl_test(request: FullRlblTestRequestModel, background_tasks: BackgroundTasks) -> dict:
-    try:
-        readiness = command_builder.fullrlbl_test_readiness()
-        if not readiness["ready"]:
-            raise RuntimeError(str(readiness["detail"]))
-        machine_ids = request.machine_ids
-        if not machine_ids:
-            machine_ids = scanner.inventory.list_machine_ids()
-        params = FullRlblTestParams(
-            machine_ids=machine_ids,
-            fst_namespace=request.fst_namespace,
-            lst_namespace=request.lst_namespace,
-            pipeline_name=request.pipeline_name,
-            manifest_path=request.manifest_path,
-            runtime_patch=request.runtime_patch,
-            persist_dev_lst=request.persist_dev_lst,
-            seed_dev_lst=request.seed_dev_lst,
-            feature_fetch_mode=request.feature_fetch_mode,
-            test_mode=request.test_mode,
-            wide_range_since=request.wide_range_since,
-            wide_range_until=request.wide_range_until,
-            memory_mb=request.memory_mb,
-        )
-        cwd, command = command_builder.build_fullrlbl_test_trigger(params)
-    except Exception as exc:
-        raise _http_error(exc, 409) from exc
-    action = admin_repository.create(
-        action="trigger",
-        command=command,
-        cwd=cwd,
-        outerbounds_url=OUTERBOUNDS_FULLRLBL_TEST_URL,
-        machine_ids=machine_ids,
-        flow_name="FullRlblDevFstTestFlow",
-    )
-    background_tasks.add_task(admin_repository.run, action.id)
-    return {
-        "action": asdict(action),
-        "machine_count": len(machine_ids),
-        "test_mode": request.test_mode,
-        "fst_namespace": request.fst_namespace,
-    }
 
 
 @app.post("/api/admin/workflows/terminate")

@@ -2166,7 +2166,7 @@ dd {
 .machine-sort-button { align-items: center; background: transparent; border: 0; color: inherit; cursor: pointer; display: inline-flex; font-size: inherit; font-weight: inherit; gap: 6px; padding: 0; white-space: nowrap; }.machine-sort-button:hover, .machine-sort-button .active { color: var(--accent-text); }.machine-sort-button svg { opacity: .5; }.machine-sort-button svg.active { opacity: 1; }.machine-empty-row td { color: var(--text-muted); cursor: default; padding: 32px 14px; text-align: center; }.machine-empty-row:hover { transform: none; }
 tbody tr { transition: background-color var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast); } tbody tr:nth-child(even) { background: var(--bg-surface-alt); } tbody tr:hover { background: var(--accent-subtle); transform: translateX(2px); }
 .filter-pulse { animation: filter-flash 300ms ease; }.pagination { align-items: center; display: flex; gap: 8px; justify-content: center; padding: 14px 0 4px; }.pagination-btn { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-primary); cursor: pointer; font-size: 16px; font-weight: 600; height: 36px; transition: all var(--transition-fast); width: 36px; }.pagination-btn:hover:not(:disabled) { background: var(--accent-subtle); border-color: var(--accent); color: var(--accent); transform: translateY(-1px); box-shadow: var(--shadow-sm); }.pagination-btn:disabled { cursor: not-allowed; opacity: .35; }.pagination-info { color: var(--text-secondary); font-size: 13px; font-weight: 600; padding: 0 8px; }.pagination-total { color: var(--text-muted); font-weight: 400; margin-left: 4px; }
-.admin-grid { gap: 16px; }.full-span { grid-column: 1 / -1; }.running-tasks-panel { order: -1; }.fullrlbl-panel { order: 2; }.logs-panel { order: 3; }.reference-panel { order: 4; }
+.admin-grid { gap: 16px; }.full-span { grid-column: 1 / -1; }.running-tasks-panel { order: -1; }.logs-panel { order: 3; }.reference-panel { order: 4; }
 .form-grid input,.form-grid select,.form-grid textarea,.search-field,.select-field,.log-toolbar select { background: var(--bg-surface); border-color: var(--border-strong); color: var(--text-primary); }.form-grid label,.filters label { color: var(--text-secondary); }
 .action-list-container { max-height: 600px; overflow-y: auto; scroll-behavior: smooth; }.action-card,.workflow-card { background: var(--bg-elevated); }.action-card code,.action-card pre,.sandbox-preview code,.sandbox-preview pre { background: var(--bg-inset); color: var(--text-primary); }
 .log-viewer { border-color: var(--border); }.log-toolbar { background: var(--bg-surface-alt); }.log-output { max-height: 420px !important; }.log-output.expanded { max-height: 80vh !important; }.log-expand { height: 30px; min-width: 30px; width: 30px; }.log-output::-webkit-scrollbar,.table-wrap::-webkit-scrollbar,.action-list-container::-webkit-scrollbar { height: 8px; width: 8px; }.log-output::-webkit-scrollbar-thumb,.table-wrap::-webkit-scrollbar-thumb,.action-list-container::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--radius-pill); }
@@ -2388,11 +2388,10 @@ tbody tr { transition: background-color var(--transition-fast), transform var(--
 .admin-grid > .panel { border-left: 4px solid var(--border-strong); }
 .running-tasks-panel { border-left-color: var(--info) !important; }
 .workflow-source-panel { border-left-color: var(--accent) !important; }
-.fullrlbl-panel { border-left-color: var(--warning) !important; }
 .logs-panel { border-left-color: var(--success) !important; }
 .reference-panel, .action-history-panel { border-left-color: var(--border-strong); }
 .panel-kicker { color: var(--accent-text) !important; font-size: 11px !important; font-weight: 800; letter-spacing: .08em; margin: 0 0 4px !important; text-transform: uppercase; }
-.running-tasks-panel .panel-kicker { color: var(--info) !important; }.fullrlbl-panel .panel-kicker { color: var(--warning-text) !important; }.logs-panel .panel-kicker { color: var(--success-text) !important; }
+.running-tasks-panel .panel-kicker { color: var(--info) !important; }.logs-panel .panel-kicker { color: var(--success-text) !important; }
 .admin-grid > .panel .panel-header, .action-history-panel .panel-header { border-bottom: 1px solid var(--border); margin-bottom: 16px; padding-bottom: 14px; }
 .admin-grid > .panel .panel-header p:not(.panel-kicker), .action-history-panel .panel-header p:not(.panel-kicker) { margin-top: 4px; }
 .dark .admin-readiness, .dark .active-templates { background: var(--bg-surface); border-color: var(--border); }
@@ -2775,3 +2774,10 @@ tbody tr { transition: background-color var(--transition-fast), transform var(--
   .admin-shell .tab-content { height: calc(100dvh - var(--topbar-height, 64px)); }
   .admin-shell .admin-sidebar { bottom: auto; height: 100%; left: auto; position: relative; top: auto; }
 }
+
+/* Dashboard dispatch not yet reported by the status snapshot (GitHub Actions backend). */
+.workflow-card-pending { border-style: dashed; opacity: 0.92; }
+.workflow-pending-status { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; overflow-wrap: anywhere; }
+
+/* On-demand workflow status refresh: in-flight / rate-limit note next to Refresh. */
+.status-fetch-note { display: inline-flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--text-secondary); white-space: nowrap; }

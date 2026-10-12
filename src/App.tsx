@@ -1,5 +1,5 @@
-import type { ActiveMonth, AdminAction, AdminReadiness, AdminReadinessCheck, AdminSpec, AdminView, AllMachinesBackfillForm, BackfillScope, BackfillStatus, BusyMachineInfo, DashboardSnapshot, DashboardSummary, EnvironmentTarget, FullRlblTestForm, LogsForm, MachineManifestForm, MachineStatus, MachineView, ManifestResult, MonthStatus, MultiMachineManifestForm, RunningWorkflow, RunningWorkflowsPayload, RuntimeInfo, SandboxEvent, SourceType, StatusPayload, StopForm, Tab, Toast, TriggerForm, WorkflowSourceForm, WorkflowSummaryPayload } from './types';
-import { API_BASE, BLOB_SOURCE_STORAGE_KEY, DEFAULT_DEV_NAMESPACE, DEFAULT_OUTERBOUNDS_URL, EMPTY_MACHINES, OUTERBOUNDS_BASE, PROD_ACCOUNT, PROD_CONFIRMATION, PROD_CONTAINER, RECOMMENDED_MACHINE_CONCURRENCY, STATUS_OPTIONS, TEST_ACCOUNT, TEST_CONTAINER } from './constants';
+import type { ActiveMonth, AdminAction, AdminReadiness, AdminReadinessCheck, AdminSpec, AdminView, AllMachinesBackfillForm, BackfillScope, BackfillStatus, BusyMachineInfo, DashboardSnapshot, DashboardSummary, EnvironmentTarget, LogsForm, MachineManifestForm, MachineStatus, MachineView, ManifestResult, MonthStatus, MultiMachineManifestForm, RunningWorkflow, RunningWorkflowsPayload, RuntimeInfo, SandboxEvent, SourceType, StatusPayload, StopForm, Tab, Toast, TriggerForm, WorkflowSourceForm, WorkflowSummaryPayload } from './types';
+import { API_BASE, BLOB_SOURCE_STORAGE_KEY, DEFAULT_DEV_NAMESPACE, DEFAULT_OUTERBOUNDS_URL, EMPTY_MACHINES, OUTERBOUNDS_BASE, PROD_ACCOUNT, PROD_CONFIRMATION, PROD_CONTAINER, RECOMMENDED_MACHINE_CONCURRENCY, SANDBOX_ENABLED, STATUS_OPTIONS, TEST_ACCOUNT, TEST_CONTAINER } from './constants';
 import { backfillMonthUntil, formatElapsedTime, formatNumber, getCachedJson, orchestratorMonthIndex, orchestratorMonthsThroughToday, utcToday, workflowSocketUrl, writeCachedJson } from './utils';
 import { useToasts, useTopbarHeightVar } from './hooks';
 import { CopyMachineIdButton, CurrentCostPanel, OuterboundsProbePanel, useOuterboundsProbeStatus, EmptyState, LoadingMetrics, LoadingWidget, LogViewer, ManifestCreatedDialog, Progress, StatusPill, TestMachineBadge, ToastContainer } from './components';
@@ -19,6 +19,7 @@ import {
   type SplitSpec,
 } from './features/backfill';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { postWorkflowRefresh, useRetryCountdown, useWorkflowLiveSocket } from './features/workflows/workflowStatusRefresh';
 import {
   ArrowLeft,
   AlertTriangle,
@@ -38,6 +39,7 @@ import {
   FileCode2,
   Filter,
   FlaskConical,
+  GitBranch,
   History,
   Loader2,
   Play,
@@ -131,6 +133,13 @@ function App() {
   }, []);
 
   const workflowMutationsEnabled = runtimeInfo?.capabilities.workflow_mutations === true;
+
+  // Right after an app restart the saved scan loads in the background: re-read once it is ready.
+  useEffect(() => {
+    if (!payload?.persistence?.loading) return;
+    const timer = window.setTimeout(() => void loadStatus(true), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [payload, loadStatus]);
 
   useEffect(() => {
     if (!payload?.scan_state.running) return;
@@ -265,10 +274,12 @@ function App() {
             <Terminal size={16} />
             <span>Admin Actions</span>
           </button>
+          {SANDBOX_ENABLED ? (
           <button className={activeTab === 'sandbox' ? 'active' : ''} type="button" onClick={() => handleTabChange('sandbox')}>
             <FlaskConical size={16} />
             <span>Sandbox</span>
           </button>
+          ) : null}
           </div>
           <FeaturesSourceSwitch
             status={payload?.data_sources?.features_source}
@@ -321,7 +332,7 @@ function App() {
             onToast={addToast}
           />
         ) : (
-          activeTab === 'admin' ? <AdminTab onToast={addToast} workflowMutationsEnabled={workflowMutationsEnabled} /> : <SandboxTab />
+          activeTab === 'admin' || !SANDBOX_ENABLED ? <AdminTab onToast={addToast} workflowMutationsEnabled={workflowMutationsEnabled} /> : <SandboxTab />
         )}
       </div>
     </main>
@@ -526,7 +537,10 @@ function MonitorTab({
           <div><h2 className="health-headline">{healthHeadline}</h2><p className="health-detail">{healthDetail}</p></div>
         </div>
         <div className="health-banner-meta">
-          <span className="last-refreshed">Last refreshed: {payload?.snapshot.generated_at ? formatTimestamp(payload.snapshot.generated_at) : 'Never'}</span>
+          <span className="last-refreshed" title={payload?.persistence?.loaded_from ? `Restored from the saved scan (${payload.persistence.loaded_from}); use Rescan for fresh data.` : undefined}>
+            Last scanned at: {payload?.snapshot.generated_at && payload.snapshot.scan_id !== 'not-scanned' ? formatTimestamp(payload.snapshot.generated_at) : payload?.persistence?.loading ? 'loading saved scan…' : 'Never'}
+            {payload?.persistence?.loaded_from ? ' (restored after restart)' : ''}
+          </span>
           <button className="icon-button" type="button" onClick={() => void onRefresh()} title="Refresh status" disabled={isRefreshing}><RefreshCw className={isRefreshing ? 'spin' : ''} size={18} /></button>
         </div>
       </section>
@@ -1364,22 +1378,6 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
   const outerboundsProbe = useOuterboundsProbeStatus();
   const [adminSidebarOpen, setAdminSidebarOpen] = useState(true);
   const [operatorNote, setOperatorNote] = useState(() => localStorage.getItem('ulrpm-admin-operator-note') ?? '');
-  const [fullrlblForm, setFullrlblForm] = useState<FullRlblTestForm>({
-    machine_ids: '',
-    fst_namespace: DEFAULT_DEV_NAMESPACE,
-    lst_namespace: 'severity-relabel-dev-ulrpm',
-    pipeline_name: '',
-    manifest_path: '',
-    runtime_patch: false,
-    persist_dev_lst: false,
-    seed_dev_lst: false,
-    feature_fetch_mode: 'legacy',
-    test_mode: 'fetch_only',
-    wide_range_since: '2024/08/30/00',
-    wide_range_until: '2026/08/30/00',
-    memory_mb: 8192,
-  });
-  const [fullrlblMachines, setFullrlblMachines] = useState<string[]>([]);
   const [runnerMachines, setRunnerMachines] = useState<MachineStatus[]>([]);
   const [runnerActiveMonths, setRunnerActiveMonths] = useState<Record<string, ActiveMonth[]>>({});
   const [runnerActiveMonthsLoading, setRunnerActiveMonthsLoading] = useState(false);
@@ -1390,14 +1388,12 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
   const loadAdminReference = useCallback(async (force = false) => {
     setReferenceRefreshing(true);
     try {
-      const [loadedSpec, loadedActions, loadedReadiness, machinesData, statusData] = await Promise.all([
+      const [loadedSpec, loadedActions, loadedReadiness, statusData] = await Promise.all([
         getCachedJson<AdminSpec>('admin-spec', `${API_BASE}/api/admin/spec`, 30 * 60_000, force),
         getCachedJson<{ actions: AdminAction[] }>('admin-actions', `${API_BASE}/api/admin/actions`, 60_000, true),
         getCachedJson<AdminReadiness>('admin-readiness', `${API_BASE}/api/admin/readiness`, 5 * 60_000, force),
-        getCachedJson<{ machine_ids: string[] }>('fullrlbl-machines', `${API_BASE}/api/admin/fullrlbl/machines`, 30 * 60_000, force),
         getCachedJson<StatusPayload>('runner-machines', `${API_BASE}/api/backfill/status`, 60_000, force),
       ]);
-      setFullrlblMachines(machinesData.machine_ids);
       setRunnerMachines(statusData.snapshot.machines);
       setSpec(loadedSpec);
       setActions(loadedActions.actions);
@@ -1447,6 +1443,27 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
       setWorkflowRefreshing(false);
     }
   }, [applyWorkflowSummary]);
+
+  // Explicit Refresh only (no background polling): starts or joins one status refresh on
+  // the backend, rate limited; a limited answer shows 'retry in Ns'.
+  const [statusRetryIn, applyStatusRetry] = useRetryCountdown();
+  const refreshWorkflowStatus = useCallback(async () => {
+    setWorkflowRefreshing(true);
+    try {
+      const summary = await postWorkflowRefresh();
+      applyWorkflowSummary(summary);
+      applyStatusRetry(summary.refresh);
+      if (summary.refresh?.state === 'limited') {
+        onToast('info', `Status refresh is rate limited: retry in ${summary.refresh.retry_after ?? 0}s (showing the cached status).`);
+      }
+      setAdminError(null);
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWorkflowRefreshing(false);
+    }
+  }, [applyWorkflowSummary, applyStatusRetry, onToast]);
+  const statusFetching = workflowRefreshing || Boolean(workflowSummary?.refreshing || workflowSummary?.refresh?.refreshing);
 
   const loadAdmin = useCallback(async () => {
     await Promise.all([loadAdminReference(true), loadWorkflowData(true)]);
@@ -1829,48 +1846,16 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
     );
   };
 
-  const triggerFullRlblTest = async () => {
-    setBusyAction('fullrlbl-trigger');
-    try {
-      const machineIdList = fullrlblForm.machine_ids.trim()
-        ? parseMachineIds(fullrlblForm.machine_ids)
-        : fullrlblMachines;
-      const response = await fetch(`${API_BASE}/api/admin/fullrlbl/trigger`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...fullrlblForm,
-          machine_ids: machineIdList,
-        }),
-      });
-      const result = await response.json() as { detail?: string; machine_count?: number; test_mode?: string };
-      if (!response.ok) {
-        throw new Error(result.detail ?? `Request failed: ${response.status}`);
-      }
-      await loadAdmin();
-      setAdminError(null);
-      onToast('success', `FullRlbl test queued for ${result.machine_count} machines (${result.test_mode}).`);
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      setAdminError(msg);
-      onToast('error', `FullRlbl test failed: ${msg}`);
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
   const runningUrl = spec?.outerbounds_running_url ?? `${DEFAULT_OUTERBOUNDS_URL}&status=running`;
   const pastUrl = spec?.outerbounds_past_url ?? `${DEFAULT_OUTERBOUNDS_URL}&status=completed,failed,error`;
   const workflows = runningWorkflows?.workflows ?? [];
   const manifestStorageReady = adminReadiness?.manifest_storage.ready === true;
   const argoReady = adminReadiness?.argo.ready === true;
-  const fullrlblReady = adminReadiness?.fullrlbl_test?.ready === true;
   // A missing Outerbounds service principal must not pre-disable actions: the
   // backend answers 503 with the exact setup instructions, shown as the result.
   const spNotConfigured = (check?: AdminReadinessCheck) => check?.error_type === 'outerbounds_sp_not_configured';
   const argoActionsAllowed = argoReady || spNotConfigured(adminReadiness?.argo);
-  const fullrlblActionsAllowed = fullrlblReady || spNotConfigured(adminReadiness?.fullrlbl_test);
-  const readyChecks = [manifestStorageReady, argoReady, fullrlblReady].filter(Boolean).length;
+  const readyChecks = [manifestStorageReady, argoReady].filter(Boolean).length;
   const summaryCounts = workflowSummary?.counts;
   const activeRuns = summaryCounts?.active ?? 0;
   const completedRuns = summaryCounts?.completed ?? 0;
@@ -2039,10 +2024,6 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
           <strong>Workflow actions</strong>
           <span>{adminReadiness ? (argoReady ? (adminReadiness.argo.backend === 'metaflow' || adminReadiness.argo.backend === 'github_actions' ? (adminReadiness.argo.detail ?? 'Outerbounds dispatch configured') : 'Argo authorization verified') : adminReadiness.argo.detail) : 'Checking permissions...'}</span>
         </div>
-        <div className={fullrlblReady ? 'readiness-item ready' : 'readiness-item blocked'}>
-          <strong>FullRlbl test template</strong>
-          <span>{adminReadiness?.fullrlbl_test ? (fullrlblReady ? `Deployed: ${adminReadiness.fullrlbl_test.template_name ?? 'ready'}` : adminReadiness.fullrlbl_test.detail) : 'Checking template...'}</span>
-        </div>
       </section>
 
       {spec?.templates ? (
@@ -2051,7 +2032,6 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
           <div className="template-list">
             <div><strong>FSTBackfill:</strong> <code>{spec.templates.fst_backfill}</code></div>
             <div><strong>ULRPM Orchestrator:</strong> <code>{spec.templates.ulrpm_orchestrator}</code></div>
-            <div><strong>FullRlbl Test:</strong> <code>{spec.templates.fullrlbl_test}</code></div>
           </div>
         </details>
       ) : null}
@@ -2109,7 +2089,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
         <div>
           <p className="eyebrow">Backfill operations</p>
           <h2>Start with a manifest, then run the backfill.</h2>
-          <p>Common daily actions are shown below. Workflow setup, FullRlbl testing, logs, and action history are available when needed.</p>
+          <p>Common daily actions are shown below. Workflow setup, logs, and action history are available when needed.</p>
         </div>
       </section>
 
@@ -2408,104 +2388,6 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
           </div>
         </div>
 
-        <div className="panel full-span fullrlbl-panel advanced-panel admin-view-panel advanced-view-panel">
-          <div className="panel-header">
-            <div>
-              <p className="panel-kicker">Advanced validation</p>
-              <h2>FullRlbl Dev Testing</h2>
-              <p>Test Severity relabeling against dev FST without touching production. Per-machine OOM monitoring.</p>
-            </div>
-            {(spec as any)?.fullrlbl_test?.outerbounds_url ? (
-              <a className="export-link" href={(spec as any).fullrlbl_test.outerbounds_url} target="_blank" rel="noreferrer">
-                <ExternalLink size={16} />
-                <span>Runs</span>
-              </a>
-            ) : null}
-          </div>
-          <div className="form-grid">
-            <label className="wide">
-              Machine IDs
-              <textarea
-                value={fullrlblForm.machine_ids}
-                onChange={(event) => setFullrlblForm({ ...fullrlblForm, machine_ids: event.target.value })}
-                rows={4}
-                placeholder={`Leave empty to use all ${fullrlblMachines.length} inventory machines, or paste IDs (one per line / comma-separated)`}
-              />
-            </label>
-            <label>
-              FST Namespace
-              <input value={fullrlblForm.fst_namespace} onChange={(event) => setFullrlblForm({ ...fullrlblForm, fst_namespace: event.target.value })} />
-            </label>
-            <label>
-              LST Namespace
-              <input value={fullrlblForm.lst_namespace} onChange={(event) => setFullrlblForm({ ...fullrlblForm, lst_namespace: event.target.value })} />
-            </label>
-            <label>
-              Pipeline Name
-              <input value={fullrlblForm.pipeline_name} onChange={(event) => setFullrlblForm({ ...fullrlblForm, pipeline_name: event.target.value })} placeholder="Auto-generated when empty" />
-            </label>
-            <label>
-              Test Mode
-              <select value={fullrlblForm.test_mode} onChange={(event) => setFullrlblForm({ ...fullrlblForm, test_mode: event.target.value })}>
-                <option value="fetch_only">Fetch Only (memory test)</option>
-                <option value="full">Full (fetch + inference + persist)</option>
-              </select>
-            </label>
-            <label>
-              Feature Fetch Mode
-              <select value={fullrlblForm.feature_fetch_mode} onChange={(event) => setFullrlblForm({ ...fullrlblForm, feature_fetch_mode: event.target.value })}>
-                <option value="legacy">Legacy (original path)</option>
-                <option value="streaming">Streaming (patched)</option>
-                <option value="auto">Auto</option>
-              </select>
-            </label>
-            <label>
-              Memory (MB)
-              <input type="number" min={4096} step={1024} value={fullrlblForm.memory_mb} onChange={(event) => setFullrlblForm({ ...fullrlblForm, memory_mb: Number(event.target.value) })} />
-            </label>
-            <label className="wide">
-              Manifest Path
-              <input value={fullrlblForm.manifest_path} onChange={(event) => setFullrlblForm({ ...fullrlblForm, manifest_path: event.target.value })} placeholder="Empty = generate FST-bounded synthetic manifest per machine" />
-            </label>
-            <label>
-              Since
-              <input type="datetime-local" value={wideRangeDateTimeValue(fullrlblForm.wide_range_since)} onChange={(event) => setFullrlblForm({ ...fullrlblForm, wide_range_since: wideRangeFromDateTimeValue(event.target.value) })} />
-            </label>
-            <label>
-              Until
-              <input type="datetime-local" value={wideRangeDateTimeValue(fullrlblForm.wide_range_until)} onChange={(event) => setFullrlblForm({ ...fullrlblForm, wide_range_until: wideRangeFromDateTimeValue(event.target.value) })} />
-            </label>
-            <label className="checkbox-field">
-              <input type="checkbox" checked={fullrlblForm.runtime_patch} onChange={(event) => setFullrlblForm({ ...fullrlblForm, runtime_patch: event.target.checked })} />
-              Enable streaming runtime patch
-            </label>
-            <label className="checkbox-field">
-              <input type="checkbox" checked={fullrlblForm.persist_dev_lst} onChange={(event) => setFullrlblForm({ ...fullrlblForm, persist_dev_lst: event.target.checked })} />
-              Persist to dev LST
-            </label>
-            <label className="checkbox-field">
-              <input type="checkbox" checked={fullrlblForm.seed_dev_lst} onChange={(event) => setFullrlblForm({ ...fullrlblForm, seed_dev_lst: event.target.checked })} />
-              Seed dev LST from production
-            </label>
-          </div>
-          <div className="actions">
-            <button className="primary-button" type="button" onClick={() => void triggerFullRlblTest()} disabled={busyAction === 'fullrlbl-trigger' || !fullrlblActionsAllowed}>
-              {busyAction === 'fullrlbl-trigger' ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
-              <span>
-                {fullrlblForm.machine_ids.trim()
-                  ? `Run FullRlbl Test (${parseMachineIds(fullrlblForm.machine_ids).length} machines)`
-                  : `Run FullRlbl Test (all ${fullrlblMachines.length} machines)`}
-              </span>
-            </button>
-          </div>
-          {fullrlblMachines.length > 0 ? (
-            <details className="machine-inventory-details">
-              <summary>{fullrlblMachines.length} machines in inventory</summary>
-              <pre className="log-output">{fullrlblMachines.join('\n')}</pre>
-            </details>
-          ) : null}
-        </div>
-
         <div className="panel full-span running-tasks-panel admin-view-panel operations-panel">
           <div className="panel-header">
             <div>
@@ -2514,8 +2396,10 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
               <p>All running Argo workflows. Stop a specific workflow.</p>
             </div>
             <div className="actions">
-              <button className="icon-button" type="button" onClick={() => void loadWorkflowData(true)} title="Refresh running tasks" disabled={workflowRefreshing}>
-                <RefreshCw className={workflowRefreshing ? 'spin' : ''} size={18} />
+              {statusFetching ? <span className="status-fetch-note" role="status"><Loader2 className="spin" size={14} /> Fetching status…</span>
+                : statusRetryIn > 0 ? <span className="status-fetch-note" role="status">Retry in {statusRetryIn}s</span> : null}
+              <button className="icon-button" type="button" onClick={() => void refreshWorkflowStatus()} title={statusRetryIn > 0 ? `Refresh available in ${statusRetryIn}s` : 'Refresh running tasks (fetches the current workflow status)'} aria-label="Refresh running tasks" disabled={statusFetching || statusRetryIn > 0}>
+                <RefreshCw className={statusFetching ? 'spin' : ''} size={18} />
               </button>
               <a className="icon-link" href={runningUrl} target="_blank" rel="noreferrer" title="Open running workflows in Outerbounds">
                 <ExternalLink size={16} />
@@ -2573,16 +2457,25 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
                     <section className="workflow-machine-group" key={machineId}>
                       <div className="workflow-machine-header"><span>Machine</span><strong className="mono">{machineId}</strong>{machineId !== 'Machine not linked' ? <><CopyMachineIdButton machineId={machineId} /><a className="secondary-button machine-detail-link" href={detailMachineHref(machineId)}><Eye size={15} /><span>Go to machine</span></a></> : null}<span>{machineWorkflows.length} run{machineWorkflows.length === 1 ? '' : 's'}</span></div>
                       {machineWorkflows.map((workflow) => (
-                    <article className="workflow-card" key={workflow.workflow_id}>
+                    <article className={`workflow-card${workflow.pending ? ' workflow-card-pending' : ''}`} key={workflow.workflow_id}>
                       <div>
-                        <strong className="mono break">{workflow.workflow_id}</strong>
-                        <span>{workflow.status} · started {formatTimestamp(workflow.started_at ?? workflow.created_at)}</span>
+                        <strong className="mono break">{workflow.pending && workflow.workflow_id.startsWith('pending-') ? 'Awaiting workflow id' : workflow.workflow_id}</strong>
+                        {workflow.pending
+                          ? <span className="workflow-pending-status"><Loader2 className="spin" size={13} /> {workflow.status} · {workflow.pending_detail ?? 'Fetching status…'} · queued {formatTimestamp(workflow.created_at)}</span>
+                          : <span>{workflow.status} · started {formatTimestamp(workflow.started_at ?? workflow.created_at)}</span>}
                       </div>
                       <div className="actions">
-                        <a className="icon-link" href={workflow.outerbounds_url} target="_blank" rel="noreferrer" title="Open in Outerbounds">
-                          <ExternalLink size={16} />
-                        </a>
-                        <button
+                        {workflow.github_run_url ? (
+                          <a className="icon-link" href={workflow.github_run_url} target="_blank" rel="noreferrer" title="Open the GitHub Actions dispatch run">
+                            <GitBranch size={16} />
+                          </a>
+                        ) : null}
+                        {workflow.outerbounds_url && workflow.outerbounds_url !== workflow.github_run_url ? (
+                          <a className="icon-link" href={workflow.outerbounds_url} target="_blank" rel="noreferrer" title="Open in Outerbounds">
+                            <ExternalLink size={16} />
+                          </a>
+                        ) : null}
+                        {workflow.pending && workflow.workflow_id.startsWith('pending-') ? null : <button
                           className="icon-link danger"
                           type="button"
                           title="Stop this workflow"
@@ -2597,7 +2490,7 @@ function AdminTab({ onToast, workflowMutationsEnabled }: { onToast: (type: Toast
                           disabled={busyAction === `stop-${workflow.workflow_id}` || !argoActionsAllowed}
                         >
                           {busyAction === `stop-${workflow.workflow_id}` ? <Loader2 className="spin" size={16} /> : <Square size={16} />}
-                        </button>
+                        </button>}
                       </div>
                     </article>
                       ))}
@@ -2977,22 +2870,39 @@ function MachineRuns({ machineId, mode = 'history' }: { machineId: string; mode?
   const [liveWorkflowStatuses, setLiveWorkflowStatuses] = useState<Record<string, string>>({});
   const isExpanded = true;
   const [refreshing, setRefreshing] = useState(false);
+  const [serverRefreshing, setServerRefreshing] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [retryIn, applyRetry] = useRetryCountdown();
+  // Reads the app's own records (no status fetch). No interval: the list reloads on mount,
+  // on Refresh, and when the live socket reports a finished status refresh.
   useEffect(() => {
-    getCachedJson<{ actions: AdminAction[]; confirmed_running_workflow_ids?: string[]; live_workflow_statuses?: Record<string, string> }>(`machine-runs:${machineId}`, `${API_BASE}/api/admin/actions?machine_id=${encodeURIComponent(machineId)}`, 15_000, true)
+    getCachedJson<{ actions: AdminAction[]; confirmed_running_workflow_ids?: string[]; live_workflow_statuses?: Record<string, string>; refresh?: { refreshing?: boolean } }>(`machine-runs:${machineId}`, `${API_BASE}/api/admin/actions?machine_id=${encodeURIComponent(machineId)}`, 15_000, true)
       .then((payload) => {
         setRuns(payload.actions);
         setConfirmedRunningWorkflowIds(new Set(payload.confirmed_running_workflow_ids ?? []));
         setLiveWorkflowStatuses(payload.live_workflow_statuses ?? {});
+        setServerRefreshing(Boolean(payload.refresh?.refreshing));
       })
       .catch(() => { setRuns([]); setConfirmedRunningWorkflowIds(new Set()); setLiveWorkflowStatuses({}); });
   }, [machineId, refreshVersion]);
-  useEffect(() => {
-    if (mode !== 'running') return;
-    const interval = window.setInterval(() => setRefreshVersion((version) => version + 1), 15_000);
-    return () => window.clearInterval(interval);
-  }, [mode]);
-  const refresh = () => { setRefreshing(true); setRefreshVersion((version) => version + 1); window.setTimeout(() => setRefreshing(false), 500); };
+  const lastPush = useRef('');
+  useWorkflowLiveSocket(mode === 'running', (summary) => {
+    const key = `${summary.snapshot_version ?? ''}|${summary.pending_count ?? 0}|${summary.refresh?.refreshing ?? summary.refreshing ?? ''}`;
+    setServerRefreshing(Boolean(summary.refresh?.refreshing ?? summary.refreshing));
+    if (key !== lastPush.current) { lastPush.current = key; setRefreshVersion((version) => version + 1); }
+  });
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      const summary = await postWorkflowRefresh();
+      applyRetry(summary.refresh);
+      setServerRefreshing(Boolean(summary.refresh?.refreshing ?? summary.refreshing));
+    } catch { /* the reload below still shows the app's records */ } finally {
+      setRefreshing(false);
+      setRefreshVersion((version) => version + 1);
+    }
+  };
+  const fetching = refreshing || serverRefreshing;
   const workflowRuns = (runs ?? []).filter((run) => run.action === 'trigger');
   // The live set is authoritative for the Running tab. A submitted workflow
   // that is no longer in it belongs in activity history even when the Argo
@@ -3018,7 +2928,7 @@ function MachineRuns({ machineId, mode = 'history' }: { machineId: string; mode?
     { title: 'Failed', className: 'failed', runs: workflowRuns.filter((run) => run.status === 'failed') },
   ].filter((section) => mode === 'running' ? section.className === 'running' : section.className !== 'running');
   return <section className="panel machine-runs-panel">
-    <div className="panel-header"><div><p className="eyebrow">{mode === 'running' ? 'Live operations' : 'Run history'}</p><h2>{mode === 'running' ? 'Running tasks' : 'Runs for this machine'}</h2><p>Only dashboard runs submitted for {machineId} appear here.</p></div><div className="actions">{mode === 'running' ? <div className="task-phase-summary" aria-label="Live task counts"><span className="task-phase-badge running">{runningCount} running</span><span className="task-phase-badge queued">{queuedCount} queued</span></div> : null}<button className="icon-button" type="button" onClick={refresh} disabled={refreshing} title="Refresh machine runs"><RefreshCw className={refreshing ? 'spin' : ''} size={16} /></button></div></div>
+    <div className="panel-header"><div><p className="eyebrow">{mode === 'running' ? 'Live operations' : 'Run history'}</p><h2>{mode === 'running' ? 'Running tasks' : 'Runs for this machine'}</h2><p>Only dashboard runs submitted for {machineId} appear here.</p></div><div className="actions">{mode === 'running' ? <div className="task-phase-summary" aria-label="Live task counts"><span className="task-phase-badge running">{runningCount} running</span><span className="task-phase-badge queued">{queuedCount} queued</span></div> : null}{fetching ? <span className="status-fetch-note" role="status"><Loader2 className="spin" size={14} /> Fetching status…</span> : retryIn > 0 ? <span className="status-fetch-note" role="status">Retry in {retryIn}s</span> : null}<button className="icon-button" type="button" onClick={() => void refresh()} disabled={fetching || retryIn > 0} title={retryIn > 0 ? `Refresh available in ${retryIn}s` : 'Refresh machine runs (fetches the current workflow status)'} aria-label="Refresh machine runs"><RefreshCw className={fetching ? 'spin' : ''} size={16} /></button></div></div>
     {isExpanded ? (runs === null ? <LoadingWidget label="Loading machine runs" /> : workflowRuns.length === 0 ? <EmptyState message="No dashboard workflow runs have been recorded for this machine yet." /> : <div className={`machine-run-sections${mode === 'running' ? ' running-only' : ''}`}>{sections.map((section) => <section className={`machine-run-section ${section.className}`} key={section.className}><div className="machine-run-section-head"><h3>{section.title}</h3><span>{section.runs.length}</span></div>{section.runs.length === 0 ? <p className="machine-run-empty">No {section.title.toLowerCase()} runs.</p> : <div className="machine-run-list">{Object.entries(section.runs.reduce<Record<string, AdminAction[]>>((groups, run) => { const name = run.flow_name ?? 'Dashboard operation'; (groups[name] ??= []).push(run); return groups; }, {})).map(([flowName, flowRuns]) => <section className="machine-flow-group" key={flowName}><h4>{flowName}</h4>{flowRuns.map((run) => { const phase = taskPhase(run, section.className); return <article className={`machine-run-row task-${phase.key}`} key={run.id}><div><strong>{run.flow_name ?? flowName}</strong><span className="mono">{run.workflow_id ?? 'Submission pending'}</span><span className={`task-phase-badge ${phase.key}`}>{phase.label}</span><span className="task-run-time">Started {formatTimestamp(run.created_at)}</span></div>{run.outerbounds_url ? <a className="icon-link" href={run.outerbounds_url} target="_blank" rel="noreferrer" title="Open this workflow in Outerbounds"><ExternalLink size={16} /></a> : null}</article>; })}</section>)}</div>}</section>)}</div>) : null}
   </section>;
 }
@@ -3254,16 +3164,6 @@ function sourceLabel(snapshot?: DashboardSnapshot) {
 
 function dateOnlyValue(value: string) {
   return /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : '';
-}
-
-function wideRangeDateTimeValue(value: string) {
-  const match = value.match(/^(\d{4})[/-](\d{2})[/-](\d{2})[T/ ]?(\d{2})?/);
-  return match ? `${match[1]}-${match[2]}-${match[3]}T${match[4] ?? '00'}:00` : '';
-}
-
-function wideRangeFromDateTimeValue(value: string) {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})/);
-  return match ? `${match[1]}/${match[2]}/${match[3]}/${match[4]}` : value;
 }
 
 function getSavedBlobSource() {
