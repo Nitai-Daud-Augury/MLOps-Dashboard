@@ -43,22 +43,18 @@ export function Banner({ tone, title, children, actions, onDismiss }: { tone: Ba
   </section>;
 }
 
-export function EmptyState({ title, children, action }: { title: string; children?: ReactNode; action?: ReactNode }) {
-  return <div className="empty"><strong>{title}</strong>{children ? <p>{children}</p> : null}{action}</div>;
+export function EmptyState({ title, children, action, icon }: { title: string; children?: ReactNode; action?: ReactNode; icon?: ReactNode }) {
+  return <div className="empty">{icon ? <span className="empty-icon" aria-hidden="true">{icon}</span> : null}<strong>{title}</strong>{children ? <p>{children}</p> : null}{action}</div>;
 }
 
 export function ErrorState({ message, onRetry }: { message: string; onRetry?: () => void }) {
-  return <div className="empty empty-error" role="alert"><strong>Could not load</strong><p>{message}</p>
+  return <div className="empty empty-error" role="alert"><span className="empty-icon" aria-hidden="true"><XCircle size={20} /></span><strong>Could not load</strong><p>{message}</p>
     {onRetry ? <button type="button" className="btn" onClick={onRetry}><RefreshCw size={14} />Retry</button> : null}</div>;
 }
 
 export function SkeletonRows({ columns, rows = 6 }: { columns: number; rows?: number }) {
   return <>{Array.from({ length: rows }, (_, row) => <tr key={row} className="skeleton-row" aria-hidden="true">
     {Array.from({ length: columns }, (__, col) => <td key={col}><span className="skeleton" /></td>)}</tr>)}</>;
-}
-
-export function KpiChip({ label, value, tone }: { label: string; value: ReactNode; tone?: Tone }) {
-  return <div className={`kpi${tone ? ` tone-${tone}` : ''}`}><span className="kpi-value mono">{value}</span><span className="kpi-label">{label}</span></div>;
 }
 
 /**
