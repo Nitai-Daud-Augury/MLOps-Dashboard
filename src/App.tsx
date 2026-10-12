@@ -21,7 +21,7 @@ function RootRedirect() {
 }
 
 function NotFound() {
-  return <main className="content"><EmptyState title="Page not found" action={<a className="btn" href="/monitor">Go to Monitoring</a>}>This address does not match a dashboard route.</EmptyState></main>;
+  return <main className="content" style={{ maxWidth: 640, paddingTop: 96 }}><EmptyState title="Page not found" action={<a className="btn" href="/monitor">Go to Monitoring</a>}>This address does not match a dashboard route.</EmptyState></main>;
 }
 
 export default function App() {
@@ -34,7 +34,8 @@ export default function App() {
             <Route index element={<FleetPage />} />
             <Route path="machines/:id" element={<MachinePage />} />
             <Route path="live" element={<LivePage />} />
-            <Route path="settings/source" element={<SourceSettingsPage />} />
+            <Route path="source" element={<SourceSettingsPage />} />
+            <Route path="settings/source" element={<Navigate to="/monitor/source" replace />} />
           </Route>
           <Route path="/admin" element={<AdminLayout />}>
             <Route index element={<AdminOverviewPage />} />

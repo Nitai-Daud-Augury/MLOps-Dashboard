@@ -1,7 +1,8 @@
-import { Square } from 'lucide-react';
+import { Activity, Lock, Send, Square, XCircle } from 'lucide-react';
 import { useState } from 'react';
 import { DEFAULT_DEV_NAMESPACE } from '../../constants';
-import { Banner, ConfirmDialog, EmptyState, ErrorState, KpiChip, RefreshButton, Spinner, StatusBadge, Timestamp } from '../../components/ui';
+import { Banner, ConfirmDialog, EmptyState, ErrorState, RefreshButton, Spinner, StatusBadge, Timestamp } from '../../components/ui';
+import { KpiCard, PageHeader, Section } from '../../components/ui/Layout';
 import { useToast } from '../../components/ui/toastContext';
 import { useWorkflowSummary } from '../../features/workflows/useWorkflowSummary';
 import { workflowSort } from '../../features/workflows/sort';
@@ -61,19 +62,24 @@ export function OperationsPage() {
 
   if (!data && summary.error) return <ErrorState message={summary.error} onRetry={() => void summary.reload()} />;
   return <>
-    <div className="page-head"><div><h1>Operations</h1>
-      <span className="muted">{data?.fetched_at ? <Timestamp value={data.fetched_at} prefix="Last fetched" /> : 'Status not fetched yet'} · snapshot v{data?.snapshot_version ?? '—'}</span></div>
-      <RefreshButton onClick={() => void summary.refresh()} fetching={summary.fetching} retryIn={summary.retryIn} />
-    </div>
+    <PageHeader title="Operations" purpose="Stop running workflows, cancel single months, and acknowledge failures."
+      meta={<><span>{data?.fetched_at ? <Timestamp value={data.fetched_at} prefix="Last fetched" /> : 'Status not fetched yet'}</span><span>snapshot v{data?.snapshot_version ?? '—'}</span></>}
+      actions={<RefreshButton onClick={() => void summary.refresh()} fetching={summary.fetching} retryIn={summary.retryIn} />} />
     {summary.refreshError ? <Banner tone="error" title="Refresh failed">{summary.refreshError}</Banner> : null}
     {data?.error ? <Banner tone="warn" title="Status source reported an error">{data.error}</Banner> : null}
-    <div className="kpis"><KpiChip label="Active" value={active.length} tone="running" /><KpiChip label="Failed (unreviewed)" value={failed.filter((w) => !reviewed.has(w.workflow_id)).length} tone="failed" /></div>
-    <section className="panel"><div className="panel-head"><h2>Running and pending</h2></div>
-      <WorkflowTable workflows={active} loading={summary.loading} empty={<EmptyWorkflows message="Nothing is running or pending." />}
+    <div className="kpis">
+      <KpiCard icon={<Activity size={20} />} tone="primary" label="Active" value={active.filter((w) => !w.pending).length} state={summary.loading ? 'loading' : 'ready'} helper="Running or queued workflows" />
+      <KpiCard icon={<Send size={20} />} tone="violet" label="Pending dispatch" value={data?.pending_count ?? active.filter((w) => w.pending).length} state={summary.loading ? 'loading' : 'ready'} helper="Sent, not yet reported" />
+      <KpiCard icon={<Lock size={20} />} tone="admin" label="Busy machines" value={Object.keys(locks.data?.busy_machines ?? {}).length} state={locks.loading ? 'loading' : locks.error && !locks.data ? 'error' : 'ready'} helper="Holding a backfill lock" />
+      <KpiCard icon={<XCircle size={20} />} tone={failed.some((w) => !reviewed.has(w.workflow_id)) ? 'danger' : 'neutral'} label="Failed (unreviewed)" value={failed.filter((w) => !reviewed.has(w.workflow_id)).length} state={summary.loading ? 'loading' : 'ready'} helper="Need a look" />
+    </div>
+    <Section title="Running and pending" description="Everything not finished yet. Stop terminates the workflow (type its ID to confirm); pending rows can't be stopped until they are reported.">
+      <WorkflowTable prefix="run" defaultSize={10} workflows={active} loading={summary.loading} empty={<EmptyWorkflows message="Nothing is running or pending." />}
         actions={(w) => w.pending && w.workflow_id.startsWith('pending-') ? <span className="muted">dispatching</span>
           : <button type="button" className="btn btn-danger-outline" onClick={() => setPending({ kind: 'terminate', workflowId: w.workflow_id })}><Square size={12} />Stop</button>} />
-    </section>
-    <section className="panel"><div className="panel-head"><h2>Cancel a month</h2><RefreshButton onClick={() => void locks.reload()} fetching={locks.loading || locks.refreshing} label="Reload locks" /></div>
+    </Section>
+    <Section title="Cancel a month" description="Stop one month of a running backfill; the parent skips it and continues with the next month."
+      actions={<RefreshButton onClick={() => void locks.reload()} fetching={locks.loading || locks.refreshing} label="Reload locks" />}>
       {locks.loading ? <p className="muted"><Spinner /> Loading machine locks…</p> : Object.keys(locks.data?.busy_machines ?? {}).length === 0
         ? <p className="muted">No machine has an active backfill.</p>
         : <label className="field">Machine with an active backfill<select value={machineId} onChange={(e) => setMachineId(e.target.value)}>
@@ -85,12 +91,12 @@ export function OperationsPage() {
               <button type="button" className="btn btn-danger-outline" disabled={!['queued', 'running'].includes(m.state)} onClick={() => setPending({ kind: 'cancel', machineId, month: m })}>Cancel month</button></div></li>; })}</ul>
           {parent ? <button type="button" className="btn btn-danger" onClick={() => setPending({ kind: 'terminate', workflowId: parent })}><Square size={12} />Stop entire backfill ({parent})</button> : null}
         </> : <p className="muted">No active months for {machineId}.</p> : null}
-    </section>
-    <section className="panel"><div className="panel-head"><h2>Failures to review</h2></div>
-      <WorkflowTable workflows={failed} empty={<EmptyState title="No failed workflows">in the last status snapshot.</EmptyState>}
+    </Section>
+    <Section title="Failures to review" description="Failed workflows from the last status snapshot. Mark them reviewed once handled so the count above drops.">
+      <WorkflowTable prefix="fail" defaultSize={10} workflows={failed} empty={<EmptyState title="No failed workflows">in the last status snapshot.</EmptyState>}
         actions={(w) => <button type="button" className="btn" disabled={reviewBusy === w.workflow_id} onClick={() => void toggleReview(w, !reviewed.has(w.workflow_id))}>
           {reviewBusy === w.workflow_id ? <Spinner /> : null}{reviewed.has(w.workflow_id) ? 'Reviewed ✓ (undo)' : 'Mark reviewed'}</button>} />
-    </section>
+    </Section>
     <ConfirmDialog open={Boolean(pending)} danger busy={busy} error={actionError}
       title={pending?.kind === 'terminate' ? 'Stop workflow?' : 'Cancel this month?'}
       confirmLabel={pending?.kind === 'terminate' ? 'Stop workflow' : 'Cancel month'}

@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { FeaturesSourceControl } from '../../components/features-source/FeaturesSourceControl';
 import { SOURCE_NAMES } from '../../components/features-source/featuresSourceApi';
+import { Database, HardDrive } from 'lucide-react';
 import { Spinner } from '../../components/ui';
+import { PageHeader, Section } from '../../components/ui/Layout';
 import { useResource } from '../../lib/api';
 import { exactTime } from '../../lib/format';
 import { useStatus } from '../../state/statusStore';
@@ -15,10 +17,20 @@ export function SourceSettingsPage() {
   const accounts = useResource<{ accounts: string[] }>('/api/blob-sources/accounts', { cacheKey: 'blob-accounts', maxAgeMs: 60 * 60_000 });
   const containers = useResource<{ containers?: string[] }>(account ? `/api/blob-sources/containers?account=${encodeURIComponent(account)}` : null, { cacheKey: `blob-containers:${account}`, maxAgeMs: 60 * 60_000 });
   const dirty = account !== blobSource.account || container !== blobSource.container;
+  const activeSource = status?.active_source;
   return <>
-    <div className="page-head"><div><h1>Data source</h1><span className="muted">Where scans read Feature Store coverage from. Switching affects every user and requires a rescan.</span></div></div>
-    <section className="panel">
-      <div className="panel-head"><h2>Features source</h2></div>
+    <PageHeader title="Data source" purpose="Choose where coverage scans read the Feature Store from. The setting is global for every user and needs a rescan." />
+    <div className="option-cards" aria-label="Available sources">
+      <div className="option-card" aria-checked={activeSource === 'blob'} role="note" style={{ cursor: 'default' }}>
+        <span className="option-title"><HardDrive size={18} aria-hidden="true" />Azure Blob {activeSource === 'blob' ? <span className="badge tone-success">Active</span> : null}</span>
+        <span className="helper">Reads the backfilled parquet files directly. Complete for every month, includes the schema check and the blob-vs-Databricks cross-check.</span>
+      </div>
+      <div className="option-card" aria-checked={activeSource === 'databricks'} role="note" style={{ cursor: 'default' }}>
+        <span className="option-title"><Database size={18} aria-hidden="true" />Databricks {activeSource === 'databricks' ? <span className="badge tone-success">Active</span> : null}</span>
+        <span className="helper">Reads the Databricks copy. Faster, but older backfilled months may be stale (bronze ingests only the current and previous month); no schema check.</span>
+      </div>
+    </div>
+    <Section title="Features source" description="Switch the source here or from the Monitoring header. A confirm dialog explains the impact; results stay visible until you rescan.">
       <FeaturesSourceControl placement="page" canSwitch />
       {status ? <dl className="dl">
         <dt>Active</dt><dd>{SOURCE_NAMES[status.active_source]} <span className="muted">({status.origin.replace('_', ' ')}{status.updated_by ? ` by ${status.updated_by}` : ''}{status.updated_at ? `, ${exactTime(status.updated_at)}` : ''})</span></dd>
@@ -28,10 +40,8 @@ export function SourceSettingsPage() {
         {status.config_error ? <><dt>Config error</dt><dd className="field-error">{status.config_error}</dd></> : null}
       </dl> : <p className="muted"><Spinner /> Loading…</p>}
       {status?.notes?.length ? <ul>{status.notes.map((note) => <li key={note} className="wrap">{note}</li>)}</ul> : null}
-    </section>
-    <section className="panel">
-      <div className="panel-head"><h2>Blob location (blob scans)</h2></div>
-      <p className="muted">Stored in this browser only; sent with the next scan request.</p>
+    </Section>
+    <Section title="Blob location" description="Storage account and container used by blob scans. Stored in this browser only and sent with the next scan request.">
       <div className="form-row">
         <label className="field">Storage account
           {accounts.data?.accounts?.length ? <select value={account} onChange={(e) => { setAccount(e.target.value); setContainer(''); }}>
@@ -47,6 +57,6 @@ export function SourceSettingsPage() {
         <button type="button" className="btn btn-primary" disabled={!dirty || !account || !container} onClick={() => setBlobSource({ account, container })}>Save</button>
       </div>
       {accounts.error ? <p className="muted">Account list unavailable ({accounts.error}); type the names instead.</p> : null}
-    </section>
+    </Section>
   </>;
 }

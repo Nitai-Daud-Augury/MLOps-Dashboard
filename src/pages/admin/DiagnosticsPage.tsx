@@ -2,6 +2,7 @@ import { Activity } from 'lucide-react';
 import { useState } from 'react';
 import { Banner, EmptyState, ErrorState, Spinner, StatusBadge, Timestamp } from '../../components/ui';
 import { type OuterboundsProbeStatus, type ProbeResult, type ProbeStageStatus } from '../../components/outerbounds-probe/probeApi';
+import { PageHeader, Section } from '../../components/ui/Layout';
 import { ApiError, errorText, postJson, useResource } from '../../lib/api';
 import type { Tone } from '../../lib/status';
 
@@ -32,17 +33,16 @@ export function DiagnosticsPage() {
     } catch (exc) { setError(exc instanceof ApiError ? exc.message : errorText(exc)); } finally { setRunning(false); }
   };
 
-  if (status.loading) return <div className="panel"><Spinner /> Loading probe status…</div>;
+  if (status.loading) return <div className="card section"><Spinner /> Loading probe status…</div>;
   if (disabled || (probe && !probe.enabled)) return <EmptyState title="Probe disabled">Set OUTERBOUNDS_PROBE_ENABLED=1 on the backend to enable the Outerbounds connectivity probe.</EmptyState>;
   if (!probe) return <ErrorState message={status.error ?? 'Probe status unavailable'} onRetry={() => void status.reload()} />;
   const gha = probe.github_dispatch;
   return <>
-    <div className="page-head"><div><h1>Diagnostics</h1>
-      <span className="muted">Read-only checks against <span className="mono">{probe.domain}</span> (perimeter {probe.perimeter}). Credentials: {probe.credentials_source}. Dispatch backend: <span className="mono">{probe.dispatch_backend ?? 'none'}</span>.</span>
-      {gha ? <span className="muted">GitHub Actions: <span className="mono">{gha.workflow}@{gha.ref}</span> in <span className="mono">{gha.repo}</span>, token {gha.token_configured ? 'configured' : 'not configured'}.</span> : null}
-    </div></div>
+    <PageHeader title="Diagnostics" purpose="Checks that the dashboard can reach Outerbounds and GitHub Actions, without starting any work (unless you enable the trigger stage)."
+      meta={<><span>Read-only checks against <span className="mono">{probe.domain}</span> (perimeter {probe.perimeter}). Credentials: {probe.credentials_source}. Dispatch backend: <span className="mono">{probe.dispatch_backend ?? 'none'}</span>.</span>
+      {gha ? <span className="muted">GitHub Actions: <span className="mono">{gha.workflow}@{gha.ref}</span> in <span className="mono">{gha.repo}</span>, token {gha.token_configured ? 'configured' : 'not configured'}.</span> : null}</>} />
     {probe.python && !probe.python.ok ? <Banner tone="error" title="Child Python unavailable">{probe.python.error}</Banner> : null}
-    <section className="panel">
+    <Section title="Connectivity probe" description="Runs each stage in order (auth, list flows, list runs…) and reports pass / fail with a hint. Stages are time-capped.">
       <div className="form-row">
         <label className="field">Flow<select value={selectedFlow} onChange={(e) => setFlow(e.target.value)} disabled={running}>
           {probe.flow_allowlist.map((name) => <option key={name}>{name}</option>)}</select></label>
@@ -62,6 +62,6 @@ export function DiagnosticsPage() {
             {stage.hint ? <p className="muted">Hint: {stage.hint}</p> : null}<span className="mono muted">{stage.ms} ms{stage.error_type ? ` · ${stage.error_type}` : ''}</span></div>
         </li>)}</ul>
       </> : <EmptyState title="No probe has run yet">Nothing is triggered unless you enable the trigger stage.</EmptyState>}
-    </section>
+    </Section>
   </>;
 }

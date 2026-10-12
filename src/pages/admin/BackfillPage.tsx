@@ -2,7 +2,9 @@ import { Send, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { DEFAULT_DEV_NAMESPACE, PROD_CONFIRMATION } from '../../constants';
-import { Banner, EmptyState, ErrorState, SkeletonRows, Spinner, StatusBadge, Timestamp } from '../../components/ui';
+import { Banner, EmptyState, ErrorState, Spinner, StatusBadge, Timestamp } from '../../components/ui';
+import { DataTable, type Column } from '../../components/ui/DataTable';
+import { Meter, PageHeader } from '../../components/ui/Layout';
 import { useToast } from '../../components/ui/toastContext';
 import { MachineStatusBadge, MachineTitle } from '../../features/machines/MachineSummary';
 import { cancelBeforeSubmit, canCancelBeforeSubmit, phaseLabel } from '../../features/backfill/actions';
@@ -15,6 +17,7 @@ import { inclusiveEndDateToExclusiveUntil, previewWindows, startDateToSince } fr
 import { errorText, postJson, useResource } from '../../lib/api';
 import { plural } from '../../lib/format';
 import { useStatus } from '../../state/statusStore';
+import type { MachineStatus } from '../../types';
 import type { AdminAction, AdminReadiness, AdminSpec, BackfillScope, BusyMachineInfo, EnvironmentTarget, ManifestResult, TriggerParams } from '../../types';
 import { orchestratorMonthIndex } from '../../utils';
 
@@ -31,7 +34,7 @@ function RunStepper({ action }: { action: AdminAction }) {
   const index = TRACK.findIndex((step) => step.phase === phase);
   return <ol className="stepper" aria-live="polite">
     {TRACK.map((step, i) => <li key={step.phase} className={i < index || phase === 'accepted' ? 'done' : i === index ? 'current' : ''}>
-      {i < index || phase === 'accepted' ? '✓' : i === index ? <Spinner /> : '○'} {step.label}</li>)}
+      <span className="step-num">{i < index || phase === 'accepted' ? '✓' : i === index ? <Spinner size={12} /> : i + 1}</span>{step.label}</li>)}
     {failed ? <li className="failed">✗ Failed</li> : cancelled ? <li className="failed">— Cancelled</li> : phase === 'accepted' ? <li className="current">⧗ Running → track in Live Ops</li> : null}
   </ol>;
 }
@@ -163,17 +166,17 @@ export function BackfillPage() {
   };
 
   const step = action ? 5 : reviewed ? 4 : targetIds.length && partitions ? 3 : targetIds.length ? 2 : 1;
-  const visible = machines.filter((m) => m.machine_id.toLowerCase().includes(search.trim().toLowerCase()) || (m.display_name ?? '').toLowerCase().includes(search.trim().toLowerCase())).slice(0, 200);
+  const visible = machines.filter((m) => m.machine_id.toLowerCase().includes(search.trim().toLowerCase()) || (m.display_name ?? '').toLowerCase().includes(search.trim().toLowerCase()));
   const toggle = (id: string) => setSelected((current) => scope === 'one' ? [id] : current.includes(id) ? current.filter((x) => x !== id) : [...current, id]);
 
   if (!payload && statusError) return <ErrorState message={statusError} onRetry={() => void reloadStatus()} />;
   return <>
-    <div className="page-head"><div><h1>Backfill</h1><span className="muted">Same-machine months always run sequentially; the backend re-checks locks and duplicates.</span></div></div>
+    <PageHeader title="Backfill" purpose="Fill missing feature months for one, some, or all machines. Months for one machine always run in order; the backend re-checks locks and duplicates." />
     <Banner tone="warn" title={`ADMIN: this dispatches real workflows (env: ${environment} · ns: ${environment === 'prod' ? 'production' : ns}).`} />
-    <ol className="stepper" aria-label="Progress">{STEPS.map((label, i) => <li key={label} className={i + 1 < step ? 'done' : i + 1 === step ? 'current' : ''}>{i + 1 < step ? '✓' : `${i + 1}`} {label}</li>)}</ol>
+    <ol className="stepper" aria-label="Progress">{STEPS.map((label, i) => <li key={label} className={i + 1 < step ? 'done' : i + 1 === step ? 'current' : ''}><span className="step-num">{i + 1 < step ? '✓' : i + 1}</span>{label}</li>)}</ol>
 
     {action ? <section className="panel">
-      <div className="panel-head"><h2>Track</h2><span className="mono muted">{action.id.slice(0, 12)} · <Timestamp value={action.created_at} /></span></div>
+      <div className="panel-head"><div><h2>Track</h2><p className="helper">Live phase of the submission until the workflow backend accepts it.</p></div><span className="mono muted">{action.id.slice(0, 12)} · <Timestamp value={action.created_at} /></span></div>
       <RunStepper action={action} />
       <p>{phaseLabel(action.phase)}{action.machine_ids?.length ? ` · ${plural(action.machine_ids.length, 'machine')}` : ''}{action.workflow_id ? <> · <span className="mono">{action.workflow_id}</span></> : null}</p>
       {action.error ? <Banner tone="error" title="Submission failed">{action.error}</Banner> : null}
@@ -186,30 +189,30 @@ export function BackfillPage() {
     </section> : null}
 
     <section className="panel" aria-labelledby="scope-h">
-      <div className="panel-head"><h2 id="scope-h">① Scope</h2>
+      <div className="panel-head"><div><h2 id="scope-h">1 · Scope</h2><p className="helper">Pick the machines to backfill. Busy machines already have a backfill running and cannot be selected.</p></div>
         <div className="fs-control" role="radiogroup" aria-label="Scope">{(['one', 'selected', 'all'] as BackfillScope[]).map((value) =>
           <button key={value} type="button" role="radio" aria-checked={scope === value} className={`seg${scope === value ? ' seg-on' : ''}`}
             onClick={() => { setScope(value); setSelected((s) => value === 'one' ? s.slice(0, 1) : s); }}>{value === 'one' ? 'One machine' : value === 'selected' ? 'Selected' : 'All machines'}</button>)}</div>
       </div>
-      {scope !== 'all' ? <div className="toolbar"><input type="search" placeholder="Search machines…" aria-label="Search machines" value={search} onChange={(e) => setSearch(e.target.value)} />
+      {scope !== 'all' ? <div className="toolbar"><input type="search" placeholder="Search machines…" aria-label="Search machines" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 260 }} />
         <span className="muted">{plural(selected.length, 'machine')} selected</span>{selected.length ? <button type="button" className="btn" onClick={() => setSelected([])}>Clear</button> : null}</div>
         : <p>All {plural(machines.length, 'machine')} in the last scan{machines.some((m) => isLocked(m.machine_id)) ? <span className="field-error"> · some are busy (blocked)</span> : null}.</p>}
-      {scope !== 'all' ? <div className="table-wrap" style={{ maxHeight: 360 }}><table>
-        <thead><tr><th scope="col"><span className="sr-only">Select</span></th><th scope="col">Machine</th><th scope="col">Status</th><th scope="col">Coverage</th><th scope="col">Backfill</th></tr></thead>
-        <tbody>{statusLoading && !machines.length ? <tr><td colSpan={5}><Spinner /> Loading machine inventory…</td></tr> : visible.map((m) => {
-          const locked = isLocked(m.machine_id);
-          return <tr key={m.machine_id}>
-            <td><input type={scope === 'one' ? 'radio' : 'checkbox'} name="machine" aria-label={`Select ${m.machine_id}`} checked={selected.includes(m.machine_id)} disabled={locked || lockLoading} onChange={() => toggle(m.machine_id)} /></td>
-            <td><MachineTitle machine={m} /></td><td><MachineStatusBadge machine={m} /></td><td className="mono">{m.months_complete}/{m.months_expected}</td>
-            <td>{lockLoading ? <span className="muted"><Spinner /> Checking…</span> : locked ? <StatusBadge tone="running" label="Busy" title={busy?.[m.machine_id]?.workflow_id} /> : <StatusBadge tone="success" label="Ready" />}</td>
-          </tr>;
-        })}{!statusLoading && !machines.length ? <tr><td colSpan={5}><EmptyState title="No machines">Run a scan in Monitoring first.</EmptyState></td></tr> : null}
-          {statusLoading && machines.length === 0 ? <SkeletonRows columns={5} rows={2} /> : null}</tbody></table></div> : null}
+      {scope !== 'all' ? <div className="table-wrap"><DataTable label="Machines to backfill" prefix="m" defaultSize={10} rows={visible} total={machines.length} rowKey={(m) => m.machine_id}
+        loading={statusLoading && !machines.length} onRowClick={(m) => { if (!isLocked(m.machine_id) && !lockLoading) toggle(m.machine_id); }}
+        empty={<EmptyState title="No machines">{machines.length ? 'No machine matches the search.' : 'Run a scan in Monitoring first.'}</EmptyState>}
+        columns={[
+          { key: 'pick', header: <span className="sr-only">Select</span>, cell: (m) => <input type={scope === 'one' ? 'radio' : 'checkbox'} name="machine" aria-label={`Select ${m.machine_id}`} checked={selected.includes(m.machine_id)}
+            disabled={isLocked(m.machine_id) || lockLoading} onClick={(e) => e.stopPropagation()} onChange={() => toggle(m.machine_id)} /> },
+          { key: 'machine', header: 'Machine', cell: (m) => <MachineTitle machine={m} />, sort: (a, b) => (a.display_name || a.machine_id).localeCompare(b.display_name || b.machine_id) },
+          { key: 'status', header: 'Status', cell: (m) => <MachineStatusBadge machine={m} />, sort: (a, b) => a.status.localeCompare(b.status) },
+          { key: 'coverage', header: 'Coverage', optional: true, cell: (m) => <Meter done={m.months_complete} total={m.months_expected} /> },
+          { key: 'lock', header: 'Backfill', cell: (m) => lockLoading ? <span className="muted"><Spinner /> Checking…</span> : isLocked(m.machine_id) ? <StatusBadge tone="running" label="Busy" title={busy?.[m.machine_id]?.workflow_id} /> : <StatusBadge tone="success" label="Ready" /> },
+        ] satisfies Column<MachineStatus>[]} /></div> : null}
       {locks.error ? <p className="field-error">Lock status unavailable: {locks.error}</p> : null}
     </section>
 
     <section className="panel" aria-labelledby="range-h">
-      <div className="panel-head"><h2 id="range-h">② Range / split</h2></div>
+      <div className="panel-head"><div><h2 id="range-h">2 · Range and split</h2><p className="helper">Which months to fill, how each month is split into manifest windows, and where it runs.</p></div></div>
       <div className="form-row">
         <label className="field">Months<select value={monthMode} onChange={(e) => setMonthMode(e.target.value as MonthMode)}>
           <option value="gaps">Gaps only (needs backfill)</option><option value="all">All backfillable months</option><option value="range">Date range</option></select></label>
@@ -229,7 +232,7 @@ export function BackfillPage() {
     </section>
 
     <section className="panel" aria-labelledby="review-h">
-      <div className="panel-head"><h2 id="review-h">③ Estimate review</h2>
+      <div className="panel-head"><div><h2 id="review-h">3 · Estimate review</h2><p className="helper">Check the size of the run before submitting. Any edit above resets the review.</p></div>
         <button type="button" className="btn" disabled={!targetIds.length} onClick={() => setReviewed(true)}>{reviewed ? 'Reviewed ✓' : 'Review estimate'}</button></div>
       <p><strong>{plural(planned.length, 'machine')}</strong> · <strong>{plural(partitions, 'month')}</strong> · <strong>{plural(windows, 'manifest window')}</strong> · {effectiveConcurrency} machine(s) at a time, months sequential per machine.</p>
       {reviewed && planned.length ? <details open={planned.length <= 10}><summary>Per-machine months</summary><ul>{Object.entries(plan).map(([id, indices]) => {
@@ -241,7 +244,7 @@ export function BackfillPage() {
     </section>
 
     <section className="panel" aria-labelledby="submit-h">
-      <div className="panel-head"><h2 id="submit-h">④ Submit</h2></div>
+      <div className="panel-head"><div><h2 id="submit-h">4 · Submit</h2><p className="helper">Dispatches the backfill (you can cancel it until it is sent), or only writes the manifests.</p></div></div>
       {submitError ? <Banner tone="error" title="Request failed" onDismiss={() => setSubmitError(null)}>{submitError}</Banner> : null}
       {manifest ? <Banner tone="info" title="Manifests created" onDismiss={() => setManifest(null)}><span className="mono">{manifest.manifest_prefix ?? manifest.manifest_path}</span> ({manifest.manifest_count ?? manifest.rows} files)</Banner> : null}
       <div className="toolbar">
