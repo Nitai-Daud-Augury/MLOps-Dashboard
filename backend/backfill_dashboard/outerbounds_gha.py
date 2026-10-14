@@ -223,7 +223,7 @@ def _counts(workflows: list[dict]) -> dict[str, int]:
     return counts
 
 
-_TERMINAL = {"succeeded", "completed", "failed", "error", "terminated"}
+_TERMINAL = {"succeeded", "completed", "failed", "error", "terminated", "cancelled", "canceled", "aborted", "timed_out", "skipped"}
 
 
 class GithubActionsRunningWorkflowProvider(RunningWorkflowProvider):
@@ -249,6 +249,9 @@ class GithubActionsRunningWorkflowProvider(RunningWorkflowProvider):
         self._fetched_at: float | None = None
         self._refreshing = False
         self._version = 0
+        # Called (in the refresh thread) with the workflow list of every successful snapshot;
+        # the app reconciles month locks here (month_locks.py).
+        self.on_snapshot: list[Callable[[list[dict]], None]] = []
 
     def _check_argo(self) -> bool:
         return github_dispatch_configured(self._environ)
@@ -305,6 +308,7 @@ class GithubActionsRunningWorkflowProvider(RunningWorkflowProvider):
         except Exception as exc:  # noqa: BLE001 - a refresh must never crash the status route
             snapshot = {"error": f"{type(exc).__name__}: {gha.redact(exc)}", "error_type": "github_dispatch_failed",
                         "fetched_at": datetime.now(timezone.utc).isoformat()}
+        fresh = list(snapshot["workflows"]) if "error" not in snapshot and snapshot.get("workflows") is not None else None
         with self._lock:
             previous = self._snapshot or {}
             if "error" in snapshot and previous.get("workflows") is not None:
@@ -314,6 +318,12 @@ class GithubActionsRunningWorkflowProvider(RunningWorkflowProvider):
             self._fetched_at = self._clock()
             self._refreshing = False
             self._version += 1
+        if fresh is not None:
+            for hook in list(self.on_snapshot):
+                try:
+                    hook(fresh)
+                except Exception as exc:  # noqa: BLE001 - a hook must never break the status refresh
+                    print(f"[workflow-status] on_snapshot hook failed: {type(exc).__name__}: {gha.redact(exc)}", flush=True)
 
     def _query(self, running_only: bool) -> dict:
         if not self._check_argo():

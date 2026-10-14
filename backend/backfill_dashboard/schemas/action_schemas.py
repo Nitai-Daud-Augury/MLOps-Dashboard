@@ -11,6 +11,13 @@ class CancelMonthRequest(BaseModel):
     environment: str = "dev"
 
 
+class ReleaseMonthLockRequest(BaseModel):
+    """Admin release of one stale month lock. ``confirm`` must equal ``<machine_id>:<YYYY-MM>``."""
+    confirm: str = ""
+    reason: str = Field(default="", max_length=500)
+    dry_run: bool = True
+
+
 class LogsRequest(BaseModel):
     source: WorkflowSourceModel = Field(default_factory=WorkflowSourceModel)
     run_task_path: str = ""

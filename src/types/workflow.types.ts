@@ -13,6 +13,12 @@ export interface RunningWorkflow {
   pending?: boolean;
   pending_detail?: string;
   github_run_url?: string | null;
+  /** FSTBackfill child -> its ULRPM parent (linked app-side from the manifest batch) and month. */
+  parent_workflow_id?: string | null;
+  child_workflow_ids?: string[];
+  month_index?: number | null;
+  year?: number | null;
+  month?: number | null;
 }
 export interface RunningWorkflowsPayload {
   workflows: RunningWorkflow[];
