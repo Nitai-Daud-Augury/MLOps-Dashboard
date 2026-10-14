@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Match
 from starlette.staticfiles import StaticFiles
 
@@ -106,8 +106,14 @@ def register_static_spa_host(
         name="dashboard-assets",
     )
 
-    async def serve_root() -> FileResponse:
-        return FileResponse(index_file)
+    def index_response() -> HTMLResponse:
+        # index.html is small: send it as a plain body (read per request, so a rebuild is
+        # picked up). FileResponse streams it and, on some Starlette versions, an early
+        # client disconnect yields 200 + Content-Length with an empty body.
+        return HTMLResponse(index_file.read_bytes(), headers={"Cache-Control": "no-cache"})
+
+    async def serve_root() -> HTMLResponse:
+        return index_response()
 
     async def serve_spa_path(request: Request, path: str) -> Response:
         request_path = request.url.path
@@ -124,7 +130,7 @@ def register_static_spa_host(
         last = path.rsplit("/", 1)[-1]
         if "." in last or "/assets/" in f"/{path}":
             return JSONResponse({"detail": "Not Found"}, status_code=404)
-        return FileResponse(index_file)
+        return index_response()
 
     app.add_api_route("/", serve_root, methods=["GET", "HEAD"], include_in_schema=False)
     app.add_api_route(

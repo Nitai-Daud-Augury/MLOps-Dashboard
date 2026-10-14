@@ -18,15 +18,21 @@ def _request(app, path: str, method: str = "GET"):
     async def run():
         sent = []
         received = False
+        done = asyncio.Event()
+
         async def receive():
+            # Like a real server: the client stays connected until the response is complete.
             nonlocal received
             if received:
+                await done.wait()
                 return {"type": "http.disconnect"}
             received = True
             return {"type": "http.request", "body": b"", "more_body": False}
 
         async def send(message):
             sent.append(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                done.set()
 
         raw_path = path.encode("ascii")
         scope = {
