@@ -11,10 +11,11 @@ import { putFeaturesSource, SOURCE_NAMES, type FeaturesSource } from './features
  * StatusContext, PUTs /api/settings/features-source behind a confirm dialog (a rescan is
  * required), and offers "Switch and rescan now".
  *
- * placement: "header" = compact segmented control; "page" = full control with explanations.
+ * placement: "inline" = labelled control with a one-line explanation (Fleet page);
+ *            "header" = compact segmented control; "page" = full control with explanations.
  * canSwitch: false renders a read-only indicator (no PUT possible).
  */
-export function FeaturesSourceControl({ placement, canSwitch }: { placement: 'header' | 'page'; canSwitch: boolean }) {
+export function FeaturesSourceControl({ placement, canSwitch }: { placement: 'inline' | 'header' | 'page'; canSwitch: boolean }) {
   const { payload, reload, startScan } = useStatus();
   const notify = useToast();
   const status = payload?.data_sources?.features_source;
@@ -51,7 +52,7 @@ export function FeaturesSourceControl({ placement, canSwitch }: { placement: 'he
   }
   return <>
     <div className={`fs-control fs-${placement}`} role="radiogroup" aria-label="Features source">
-      {placement === 'header' ? <span className="fs-label">Source</span> : null}
+      {placement !== 'page' ? <span className="fs-label">Data source</span> : null}
       {options.map((option) => {
         const Icon = option === 'blob' ? HardDrive : Database;
         return <button key={option} type="button" role="radio" aria-checked={active === option}
@@ -62,6 +63,7 @@ export function FeaturesSourceControl({ placement, canSwitch }: { placement: 'he
         </button>;
       })}
       {switching ? <span className="muted" role="status">Switching…</span> : null}
+      {placement === 'inline' ? <span className="helper fs-help">Where scans read feature coverage. Switching applies to everyone and needs a rescan.</span> : null}
     </div>
     <ConfirmDialog open={Boolean(pending)} title={`Switch features source to ${pending ? SOURCE_NAMES[pending] : ''}?`}
       confirmLabel="Switch and rescan now" busy={Boolean(switching)} error={error}

@@ -15,9 +15,11 @@ function cellTone(month: MonthStatus, active?: ActiveMonth): { tone: Tone; label
 }
 
 /** Text month grid (no chart): one row per year, a cell per month with icon + tooltip. */
-export function MonthGrid({ months, active = [] }: { months: MonthStatus[]; active?: ActiveMonth[] }) {
+export function MonthGrid({ months: raw, active }: { months?: MonthStatus[] | null; active?: ActiveMonth[] | null }) {
+  // Real scans can omit months or a partition; skip those instead of crashing the page.
+  const months = (raw ?? []).filter((m) => m && m.partition);
   if (!months.length) return <p className="muted">No month partitions in the last scan.</p>;
-  const activeByIndex = new Map(active.map((item) => [item.month_index, item]));
+  const activeByIndex = new Map((active ?? []).map((item) => [item.month_index, item]));
   const years = new Map<number, MonthStatus[]>();
   for (const month of [...months].sort((a, b) => a.partition.index - b.partition.index)) {
     (years.get(month.partition.year) ?? years.set(month.partition.year, []).get(month.partition.year)!).push(month);

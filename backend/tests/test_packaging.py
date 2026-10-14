@@ -104,12 +104,12 @@ def test_databricks_bundle_names_sources_targets_and_secret_binding_are_safe():
     assert app["lifecycle"]["started"] is False
     assert app["resources"] == [
         {"name": "mongodb_url", "secret": {
-            "scope": "${var.mongodb_secret_scope}",
+            "scope": "${var.dashboard_secret_scope}",
             "key": "${var.mongodb_secret_key}",
             "permission": "READ",
         }},
         {"name": "fst_account_key", "secret": {
-            "scope": "${var.mongodb_secret_scope}",
+            "scope": "${var.dashboard_secret_scope}",
             "key": "fst_prod_account_key",
             "permission": "READ",
         }},
@@ -118,17 +118,18 @@ def test_databricks_bundle_names_sources_targets_and_secret_binding_are_safe():
             "permission": "CAN_USE",
         }},
         {"name": "github_dispatch_token", "secret": {
-            "scope": "${var.mongodb_secret_scope}",
+            "scope": "${var.dashboard_secret_scope}",
             "key": "github_dispatch_token",
             "permission": "READ",
         }},
         {"name": "fst_backfill_manifest_sas", "secret": {
-            "scope": "${var.mongodb_secret_scope}",
+            "scope": "${var.dashboard_secret_scope}",
             "key": "fst_backfill_manifest_sas",
             "permission": "READ",
         }},
     ]
-    assert {"mongodb_secret_scope", "mongodb_secret_key"} <= set(bundle["variables"])
+    assert {"dashboard_secret_scope", "mongodb_secret_key"} <= set(bundle["variables"])
+    assert "mongodb_secret_scope" not in bundle["variables"]
     # No Outerbounds SP (metaflow backend) secret binding (runbook 4e has the snippet); the only
     # Outerbounds-related binding is the GitHub dispatch token.
     assert not any(word in item["name"] for item in app["resources"] for word in ("outerbounds", "metaflow"))
@@ -185,7 +186,9 @@ def test_github_workflows_are_pr_safe_oauth_m2m_poc_and_cost_conservative():
     assert deploy_job["env"]["DATABRICKS_HOST"] == "${{ vars.DATABRICKS_HOST }}"
     assert deploy_job["env"]["DATABRICKS_CLIENT_ID"] == "${{ vars.DATABRICKS_CLIENT_ID }}"
     assert deploy_job["env"]["DATABRICKS_CLIENT_SECRET"] == "${{ secrets.DATABRICKS_CLIENT_SECRET }}"
-    assert deploy_job["env"]["BUNDLE_VAR_mongodb_secret_scope"] == "${{ vars.MONGODB_SECRET_SCOPE }}"
+    # New variable first; the legacy one is a temporary fallback (expression in env, never in run:).
+    assert deploy_job["env"]["BUNDLE_VAR_dashboard_secret_scope"] == "${{ vars.DASHBOARD_SECRET_SCOPE || vars.MONGODB_SECRET_SCOPE }}"
+    assert "BUNDLE_VAR_mongodb_secret_scope" not in deploy_job["env"]
     assert deploy_job["env"]["BUNDLE_VAR_mongodb_secret_key"] == "${{ vars.MONGODB_SECRET_KEY }}"
     dispatch_inputs = deploy["on"]["workflow_dispatch"]["inputs"]
     assert dispatch_inputs["target"]["type"] == "choice"
@@ -236,7 +239,8 @@ def test_github_workflows_are_pr_safe_oauth_m2m_poc_and_cost_conservative():
     assert set(re.findall(r"secrets\.[A-Za-z0-9_]+", all_workflows)) == {
         "secrets.DATABRICKS_CLIENT_SECRET", "secrets.OB_TERMINATE_AUTHORIZE_TOKEN"}
     assert "DATABRICKS_TOKEN" not in all_workflows
-    assert "BUNDLE_VAR_mongodb_secret_scope" in all_workflows
+    assert "BUNDLE_VAR_dashboard_secret_scope" in all_workflows
+    assert "BUNDLE_VAR_mongodb_secret_scope" not in all_workflows
     assert "BUNDLE_VAR_mongodb_secret_key" in all_workflows
     assert "databricks/setup-cli@v1.10.0" in all_workflows
     assert "@main" not in all_workflows
@@ -316,9 +320,10 @@ def test_team_docs_and_plan_are_shareable_and_match_runtime():
                     "Troubleshooting", "Rollback and release ownership", "Not yet supported"):
         assert heading in runbook
     assert "Ctrl-C" in readme and "docker stop mlops-dashboard" in readme
-    assert "BUNDLE_VAR_mongodb_secret_scope" in runbook
+    assert "BUNDLE_VAR_dashboard_secret_scope" in runbook
     assert "BUNDLE_VAR_mongodb_secret_key" in runbook
-    assert "MONGODB_SECRET_SCOPE" in runbook and "MONGODB_SECRET_KEY" in runbook
+    assert "DASHBOARD_SECRET_SCOPE" in runbook and "MONGODB_SECRET_KEY" in runbook
+    assert "mongodb_secret_scope" not in runbook
     assert "Refresh/rotate Mongo auth only when status reports unauthorized/unavailable/expired" in runbook
     assert "LIFECYCLE_SOURCE" in runbook
     assert "created_at" in runbook and "installation_date" in runbook

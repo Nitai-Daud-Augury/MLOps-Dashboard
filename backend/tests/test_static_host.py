@@ -18,15 +18,21 @@ def _request(app, path: str, method: str = "GET"):
     async def run():
         sent = []
         received = False
+        done = asyncio.Event()
+
         async def receive():
+            # Like a real server: the client stays connected until the response is complete.
             nonlocal received
             if received:
+                await done.wait()
                 return {"type": "http.disconnect"}
             received = True
             return {"type": "http.request", "body": b"", "more_body": False}
 
         async def send(message):
             sent.append(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                done.set()
 
         raw_path = path.encode("ascii")
         scope = {
@@ -162,3 +168,26 @@ def test_local_vite_cors_is_disabled_for_deployed_or_nonlocal_runtime():
     assert not local_vite_development_enabled({"MLOPS_DASHBOARD_RUNTIME": "docker"})
     assert not local_vite_development_enabled({"MLOPS_DASHBOARD_RUNTIME": "databricks"})
     assert LOCAL_VITE_ORIGINS == ("http://localhost:5173", "http://127.0.0.1:5173")
+
+
+def test_deep_links_get_index_but_missing_assets_never_do(tmp_path):
+    """Refreshing /monitor/machines/<id> serves the SPA; a missing or nested asset is a 404, not HTML."""
+    app = FastAPI()
+    assert register_static_spa_host(app, _built_frontend(tmp_path))
+    page = _request(app, "/monitor/machines/67ed190c99a0ea11cd3dced5?tab=coverage".split("?")[0])
+    assert page.status_code == 200 and "MLOps Dashboard" in page.text
+    assert _request(app, "/assets/index-abc123.js").text == "console.log('built')"
+    for missing in ("/monitor/machines/assets/index-abc123.js", "/monitor/machines/67ed/assets/x.css", "/assets/gone-123.js", "/monitor/old-chunk.js"):
+        response = _request(app, missing)
+        assert response.status_code == 404, missing
+        assert "MLOps Dashboard" not in response.text, missing
+
+
+def test_vite_build_uses_absolute_asset_base():
+    """Nested routes break with a relative base ('./assets/...' resolves under /monitor/machines/)."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    config = (root / "vite.config.ts").read_text(encoding="utf-8")
+    assert "base:" not in config or "base: '/'" in config
+    index = (root / "index.html").read_text(encoding="utf-8")
+    assert 'src="./' not in index and "href=\"./" not in index

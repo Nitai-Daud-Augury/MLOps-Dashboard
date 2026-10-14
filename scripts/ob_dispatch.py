@@ -252,6 +252,45 @@ def _include_params(environ: Mapping[str, str]) -> bool:
     return str(environ.get("OB_DISPATCH_INCLUDE_PARAMS") or "") == "1"
 
 
+# Parent/child link (mirrors backend/backfill_dashboard/run_links.link_from_parameters; parity
+# is tested). Only the manifest batch directory and the month are emitted: no machine id.
+_CHILD_MANIFEST_RE = re.compile(
+    r"^(?P<batch>.+?)/monthly_[^/]+/month_(?P<index>\d{1,4})_(?P<year>\d{4})_(?P<month>\d{2})(?:\.parquet$|/part_\d+_)"
+)
+_PARENT_TEMPLATE_RE = re.compile(r"^(?P<batch>.+?)/monthly_\{machine_short\}_\{machine_id\}/")
+
+
+def _unquote(value: Any) -> str:
+    text = str(value if value is not None else "").strip()
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        try:
+            decoded = json.loads(text)
+            return decoded if isinstance(decoded, str) else text
+        except ValueError:
+            return text
+    return text
+
+
+def run_link(parameters: Mapping[str, Any]) -> dict | None:
+    child = _CHILD_MANIFEST_RE.match(_unquote(parameters.get("storage_account_manifest_path")))
+    if child:
+        return {"role": "child", "manifest_batch": child["batch"], "month_index": int(child["index"]),
+                "year": int(child["year"]), "month": int(child["month"])}
+    parent = _PARENT_TEMPLATE_RE.match(_unquote(parameters.get("manifest_template")))
+    if parent:
+        return {"role": "parent", "manifest_batch": parent["batch"]}
+    return None
+
+
+def _deployment_of(run_id: str, deployments: set[str]) -> str | None:
+    """The allowlisted deployment (Argo WorkflowTemplate) a run was submitted from, by name prefix."""
+    name = run_id.removeprefix("argo-")
+    for deployment in sorted(deployments, key=len, reverse=True):
+        if name.startswith(f"{deployment}-"):
+            return deployment
+    return None
+
+
 def _workflow_entry(workflow: Mapping[str, Any], flow: str | None, include_params: bool) -> dict:
     metadata = workflow.get("metadata") or {}
     annotations = metadata.get("annotations") or {}
@@ -272,6 +311,9 @@ def _workflow_entry(workflow: Mapping[str, Any], flow: str | None, include_param
     if flow and "metaflow/flow_name" not in entry["metadata"]["annotations"]:
         entry["metadata"]["annotations"]["metaflow/flow_name"] = flow
     parameters = ((workflow.get("spec") or {}).get("arguments") or {}).get("parameters") or []
+    link = run_link({str(item.get("name")): item.get("value") for item in parameters if isinstance(item, dict)})
+    if link:
+        entry["link"] = link
     if include_params:
         entry["spec"] = {"arguments": {"parameters": [
             {"name": item.get("name"), "value": _clip(str(item.get("value", "")), 8192)}
@@ -393,25 +435,45 @@ def op_status(request: Mapping[str, Any], environ: Mapping[str, str]) -> dict:
 
 
 def op_list_runs(request: Mapping[str, Any], environ: Mapping[str, str]) -> dict:
+    """Newest runs of each allowlisted flow, limited to the allowlisted deployments.
+
+    ``namespace(None)`` makes ``Flow(...).runs()`` return every user's runs of that flow name
+    (other projects/branches too), so the dashboard's deployments could be crowded out of
+    the first ``limit`` runs. With an allowlist (OB_DISPATCH_DEPLOYMENTS) only runs submitted
+    from those templates count toward ``limit``; up to OB_LIST_SCAN_LIMIT runs per flow are
+    scanned. Argo is read for every argo-* run (finished ones too) so FSTBackfill children
+    carry their machine-free parent link (``link``).
+    """
     import itertools
 
     from metaflow import Flow
     from metaflow.exception import MetaflowNotFound
 
     include = _include_params(environ)
+    deployments = _deployment_allowlist(environ)
+    try:
+        scan_limit = max(1, min(int(environ.get("OB_LIST_SCAN_LIMIT") or 200), 1000))
+    except ValueError:
+        scan_limit = 200
     workflows, warnings, missing = [], [], []
     client, argo_ok = None, True
     for flow in _flows(request):
         try:
-            runs = list(itertools.islice(Flow(flow).runs(), request["limit"]))
+            runs = Flow(flow).runs()
         except MetaflowNotFound:
             missing.append(flow)
             continue
-        for run in runs:
+        kept = 0
+        for run in itertools.islice(runs, max(scan_limit, request["limit"])):
+            if kept >= request["limit"]:
+                break
+            run_id = str(run.id)
+            if deployments and _deployment_of(run_id, deployments) is None:
+                continue
             if request["running_only"] and run.finished:
                 continue
-            run_id = str(run.id)
-            if not run.finished and run_id.startswith("argo-") and argo_ok:
+            kept += 1
+            if run_id.startswith("argo-") and argo_ok:
                 try:
                     client = client or _argo_client()
                     found = client.get_workflow(run_id[5:])
@@ -423,7 +485,7 @@ def op_list_runs(request: Mapping[str, Any], environ: Mapping[str, str]) -> dict
                     warnings.append(f"argo phase unavailable ({type(exc).__name__}); using Metaflow run state")
             workflows.append(_run_entry(run, flow))
     return {"ok": True, "workflows": workflows, "warnings": warnings, "flows_not_found": missing,
-            "parameters_included": include}
+            "parameters_included": include, "deployments": sorted(deployments)}
 
 
 def op_terminate(request: Mapping[str, Any], environ: Mapping[str, str]) -> dict:

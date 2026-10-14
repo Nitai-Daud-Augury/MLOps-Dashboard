@@ -7,6 +7,7 @@ import json
 import os
 import time
 from time import monotonic
+from pathlib import Path
 from uuid import uuid4
 from pydantic import BaseModel, Field
 
@@ -62,7 +63,7 @@ from .inventory_models import MachineSearchQuery
 from .scanner import BackfillScanner
 from .outerbounds_costs import current_cost_report
 from . import outerbounds_probe
-from . import pending_runs
+from . import month_locks, pending_runs, run_links
 from .status_refresh import StatusRefreshGate, is_dispatch_completion
 from .middleware import register_polling_guard
 from .static_host import LOCAL_VITE_ORIGINS, local_vite_development_enabled, register_static_spa_host
@@ -73,7 +74,7 @@ from .schemas import (
     AllMachinesBackfillRequest, CancelMonthRequest, CreateWorkflowRequest,
     LogsRequest, MachineManifestRequestModel, MonthPlanRequest,
     DailyGapManifestRequestModel, MultiMachineManifestRequestModel, OrchestratedBackfillRequest, OrchestratedManifestRequest,
-    ScanRequest, TerminateParamsModel,
+    ReleaseMonthLockRequest, ScanRequest, TerminateParamsModel,
     TerminateWorkflowRequest, TriggerParamsModel, TriggerWorkflowRequest,
     WorkflowSourceModel,
 )
@@ -86,11 +87,81 @@ status_refresh_gate = StatusRefreshGate(running_workflows)
 
 
 def _refresh_on_dispatch_completion(action: dict) -> None:
+    if action.get("action") == "terminate" and action.get("status") == "succeeded" and action.get("workflow_id"):
+        # Release first: the parent never writes a terminal month state after a terminate.
+        try:
+            _release_locks_after_terminate(str(action["workflow_id"]))
+        except Exception as exc:  # noqa: BLE001 - the status refresh below must still start
+            print(f"[month-locks] release after terminate failed: {type(exc).__name__}: {exc}", flush=True)
     if is_dispatch_completion(action):
         status_refresh_gate.request("dispatch-event", reason="event")
 
 
 admin_repository.on_finished.append(_refresh_on_dispatch_completion)
+
+LOCK_CANDIDATE_DAYS = 14
+
+
+def _lock_candidate_machines(extra: list[str] | None = None) -> list[str]:
+    """Machines that can hold a dashboard month lock: recent trigger actions plus ``extra``."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=LOCK_CANDIDATE_DAYS)
+    machines: list[str] = []
+    for action in admin_repository.list():
+        if action.get("action") != "trigger":
+            continue
+        created = pending_runs._parse(action.get("created_at"))
+        if created is not None and created < cutoff and action.get("status") not in {"queued", "running"}:
+            continue
+        machines.extend(action.get("machine_ids") or [])
+    machines.extend(extra or [])
+    return list(dict.fromkeys(item for item in machines if item))
+
+
+def _cached_status_for(workflow_ids: list[str]) -> dict:
+    """Latest known status without starting anything remote.
+
+    GitHub Actions: the in-memory ``list_runs`` snapshot. Other backends: nothing here
+    (their exact Argo/Metaflow lookups run in ``active_machine_backfills``).
+    """
+    if not workflow_ids or not RUNTIME_INFO.workflow_mutations or RUNTIME_INFO.workflow_backend != "github_actions":
+        return {}
+    return month_locks.workflows_index(running_workflows.lookup_workflows(workflow_ids))
+
+
+def _reconcile_month_locks(machine_ids: list[str], *, workflows_by_id: dict | None = None,
+                           extra_terminated: list[str] | None = None) -> list[dict]:
+    """Release active month locks whose workflow is terminal (or stale). See month_locks.py."""
+    terminated, terminal = month_locks.action_terminal_sets(admin_repository.list())
+    terminated.update(extra_terminated or [])
+    ttl = month_locks.stale_ttl_seconds()
+    released: list[dict] = []
+    for machine_id in dict.fromkeys(machine_ids):
+        records = [record for record in control_store.list_machine_states(machine_id) if record.get("state") in ACTIVE_MONTH_STATES]
+        if not records:
+            continue
+        index = workflows_by_id
+        if index is None:
+            index = _cached_status_for(sorted({wid for record in records for wid in month_locks.record_workflow_ids(record)}))
+        released.extend(month_locks.release_records(
+            control_store, records, workflows_by_id=index, terminated_ids=terminated, terminal_ids=terminal, ttl_seconds=ttl))
+    return released
+
+
+def _release_locks_after_terminate(workflow_id: str) -> list[dict]:
+    workflow_id = workflow_id.removeprefix("argo-")
+    machines = _lock_candidate_machines(admin_repository.machine_ids_for_workflow(workflow_id))
+    return _reconcile_month_locks(machines, extra_terminated=[workflow_id])
+
+
+def _reconcile_after_snapshot(workflows: list[dict]) -> None:
+    linked = run_links.link_children([dict(item) for item in workflows], admin_repository.list())
+    admin_repository.sync_workflow_statuses(linked)
+    extra = [machine for item in linked for machine in (item.get("machine_ids") or [])]
+    _reconcile_month_locks(_lock_candidate_machines(extra), workflows_by_id=month_locks.workflows_index(linked))
+
+
+if hasattr(running_workflows, "on_snapshot"):
+    running_workflows.on_snapshot.append(_reconcile_after_snapshot)
 BACKFILL_CANCEL_WINDOW_SECONDS = 15
 app = FastAPI(title="MLOps Dashboard")
 if local_vite_development_enabled():
@@ -575,6 +646,7 @@ def active_machine_backfills(machine_id: str) -> dict:
     """Return live month ownership; terminal parents never remain active here."""
     _release_stale_submission_reservations()
     try:
+        _reconcile_month_locks([machine_id])
         records = control_store.list_machine_states(machine_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Backfill control store is unavailable: {exc}") from exc
@@ -657,7 +729,7 @@ def runner_lock_status() -> dict:
             "hint": _monitor_only_workflow_hint(),
         }
     busy: dict[str, dict] = {}
-    terminal_phases = {"succeeded", "completed", "failed", "error", "terminated"}
+    terminal_phases = month_locks.TERMINAL_PHASES
     try:
         running_data = running_workflows.list_running()
     except Exception:
@@ -684,11 +756,13 @@ def runner_lock_status() -> dict:
             workflow_id = parent_id
             if parent_id.startswith("action:"):
                 action = admin_repository.get(parent_id.removeprefix("action:"))
-                if action:
-                    workflow_id = str(action.get("workflow_id") or parent_id)
-                else:
+                if not action or month_locks.is_terminal(action.get("status")) and not action.get("workflow_id"):
+                    # Submission failed/cancelled before any workflow existed: nothing owns the lane.
                     continue
+                workflow_id = str(action.get("workflow_id") or parent_id)
             live = next((item for item in running_data.get("workflows", []) if item.get("workflow_id") == workflow_id), None)
+            if live is not None and month_locks.is_terminal(live.get("status")):
+                continue
             if workflow_id and not workflow_id.startswith("action:") and not live:
                 continue
             active_months.append(record)
@@ -766,12 +840,70 @@ def get_backfill_action(action_id: str) -> dict:
     return {"action": action}
 
 
+@app.post("/api/admin/backfills/{machine_id}/months/{month_index}/release-lock")
+def release_month_lock(machine_id: str, month_index: int, body: ReleaseMonthLockRequest, request: Request) -> dict:
+    """Admin-safe release of ONE stale month lock (control-store record).
+
+    ``dry_run`` (default true) only reports the change. A real release needs
+    ``confirm == "<machine_id>:<YYYY-MM>"`` and a reason, is refused while the latest status
+    shows the record's workflow active (or a dispatch is still pending), and is audited on
+    the record's event list, in the admin action ledger and in the app log.
+    """
+    try:
+        machine_id = validate_machine_ids([machine_id])[0]
+        record = control_store.get_month_state(machine_id, month_index)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Backfill control store is unavailable: {exc}") from exc
+    if not RUNTIME_INFO.workflow_mutations:
+        raise HTTPException(status_code=503, detail="Workflow status is unavailable in this runtime; cannot prove the run is not active.")
+    if not record or record.get("state") not in ACTIVE_MONTH_STATES:
+        raise HTTPException(status_code=409, detail=f"{machine_id}:{month_index} holds no active lock (state {(record or {}).get('state', 'none')})")
+    label = f"{machine_id}:{int(record['year'])}-{int(record['month']):02d}"
+    owner = month_locks.owner_workflow_id(record)
+    if owner.startswith("action:"):
+        action = admin_repository.get(owner.removeprefix("action:")) or {}
+        if action.get("status") in {"queued", "running"}:
+            raise HTTPException(status_code=409, detail=f"Submission {owner} is still {action.get('status')}; cancel it instead.")
+    workflow_ids = month_locks.record_workflow_ids(record)
+    if RUNTIME_INFO.workflow_backend == "github_actions" and not running_workflows.list_recent().get("fetched_at"):
+        raise HTTPException(status_code=409, detail="No workflow status snapshot yet: click Refresh in Live Ops first.")
+    status_index = month_locks.workflows_index(running_workflows.lookup_workflows(workflow_ids)) if workflow_ids else {}
+    active_id = month_locks.is_active_in(record, status_index)
+    if active_id:
+        raise HTTPException(status_code=409, detail=f"Refusing: workflow {active_id} is {status_index[active_id].get('status')} in the latest status snapshot.")
+    expected = pending_runs.expected_workflow_ids(admin_repository.list(), list(status_index), window=pending_runs.window_seconds())
+    if owner and owner in {item.removeprefix("argo-") for item in expected}:
+        raise HTTPException(status_code=409, detail=f"Refusing: {owner} was dispatched recently and is not in the status snapshot yet; refresh first.")
+    proposed = {
+        "machine_id": machine_id, "month_index": month_index, "label": label, "from_state": record.get("state"),
+        "to_state": "cancelled", "workflow_ids": workflow_ids,
+        "latest_status": {wid: status_index[wid].get("status") for wid in workflow_ids if wid in status_index},
+    }
+    if body.dry_run:
+        return {"dry_run": True, "would_change": proposed, "record": record}
+    if body.confirm.strip() != label:
+        raise HTTPException(status_code=400, detail=f"confirm must be exactly {label!r}")
+    reason = body.reason.strip()
+    if len(reason) < 3:
+        raise HTTPException(status_code=400, detail="reason is required")
+    actor = _request_user(request)
+    updated = control_store.complete_action(machine_id, month_index, "cancelled", error=f"Lock released by admin: {reason}", audit={
+        "actor": actor, "source": "admin_release", "reason": reason, "released_from": record.get("state"),
+        "workflow_id": owner, "latest_status": proposed["latest_status"] or "absent"})
+    audit = admin_repository.record_completed(action="release_lock", command=[], cwd=Path("."), machine_ids=[machine_id],
+                                              stdout=json.dumps({**proposed, "actor": actor, "reason": reason}, sort_keys=True))
+    print(f"[month-locks] admin release {label} {record.get('state')} -> cancelled by {actor}: {reason}", flush=True)
+    return {"dry_run": False, "changed": proposed, "record": updated, "audit_action_id": audit.id}
+
+
 @app.get("/api/admin/actions")
 def list_admin_actions(machine_id: str | None = None) -> dict:
     if not RUNTIME_INFO.workflow_mutations:
         actions = admin_repository.for_machine(machine_id) if machine_id else admin_repository.list()
         return {"actions": actions, "confirmed_running_workflow_ids": [], "live_workflow_statuses": {}, "workflow_status_available": False}
-    workflow_snapshot = running_workflows.list_recent()
+    workflow_snapshot = _with_run_links(running_workflows.list_recent())
     recent_workflows = workflow_snapshot.get("workflows", [])
     live_workflows = running_workflows.lookup_workflows(
         admin_repository.active_workflow_ids(machine_id)
@@ -834,6 +966,15 @@ def _pending_rows_enabled() -> bool:
     return RUNTIME_INFO.workflow_mutations and RUNTIME_INFO.workflow_backend in {"github_actions", "metaflow"}
 
 
+def _with_run_links(summary: dict) -> dict:
+    """Attach machine ids and link FSTBackfill children to their ULRPM parent (app side only)."""
+    workflows = summary.get("workflows") or []
+    for workflow in workflows:
+        workflow["machine_ids"] = workflow.get("machine_ids") or admin_repository.machine_ids_for_workflow(workflow.get("workflow_id", ""))
+    run_links.link_children(workflows, admin_repository.list())
+    return summary
+
+
 def _with_pending_dispatches(summary: dict) -> dict:
     """Prepend dashboard dispatches the status source has not reported yet (instant pending rows)."""
     if not _pending_rows_enabled():
@@ -852,7 +993,7 @@ def _with_pending_dispatches(summary: dict) -> dict:
 def list_running_workflows() -> dict:
     if not RUNTIME_INFO.workflow_mutations:
         return {"workflows": [], "argo_available": False, "hint": _monitor_only_workflow_hint()}
-    return _with_pending_dispatches(running_workflows.list_running())
+    return _with_pending_dispatches(_with_run_links(running_workflows.list_running()))
 
 
 @app.get("/api/admin/workflows/summary")
@@ -863,8 +1004,7 @@ def workflow_summary() -> dict:
                 "reviewed_workflow_ids": workflow_reviews.reviewed_ids()}
     summary = running_workflows.list_recent()
     admin_repository.sync_workflow_statuses(summary.get("workflows", []))
-    for workflow in summary.get("workflows", []):
-        workflow["machine_ids"] = workflow.get("machine_ids") or admin_repository.machine_ids_for_workflow(workflow.get("workflow_id", ""))
+    _with_run_links(summary)
     summary["reviewed_workflow_ids"] = workflow_reviews.reviewed_ids()
     return _with_pending_dispatches(summary)
 
@@ -911,8 +1051,7 @@ async def live_workflow_updates(websocket: WebSocket) -> None:
         last_sent = None
         while True:
             summary = await asyncio.to_thread(running_workflows.list_recent)
-            for workflow in summary.get("workflows", []):
-                workflow["machine_ids"] = workflow.get("machine_ids") or admin_repository.machine_ids_for_workflow(workflow.get("workflow_id", ""))
+            summary = await asyncio.to_thread(_with_run_links, summary)
             summary["reviewed_workflow_ids"] = workflow_reviews.reviewed_ids()
             summary = await asyncio.to_thread(_with_pending_dispatches, summary)
             if push_only:
@@ -1748,6 +1887,8 @@ def _reject_selected_gap_months(machine_id: str, month_indices: list[int]) -> No
 def _reject_active_months(month_indices_by_machine: dict[str, list[int]]) -> None:
     """Enforce one parent backfill per machine, not merely per selected month."""
     _release_stale_submission_reservations()
+    # Terminated/failed parents and stale locks must not block a new backfill (month_locks.py).
+    _reconcile_month_locks(list(month_indices_by_machine))
     conflicts = []
     for machine_id, indices in month_indices_by_machine.items():
         # A ULRPM parent owns its whole machine lane. Allowing a different

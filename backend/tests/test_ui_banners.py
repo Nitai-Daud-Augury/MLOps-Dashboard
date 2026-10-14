@@ -57,13 +57,15 @@ def test_monitoring_and_admin_are_separate_route_trees():
 
 def test_features_source_switch_lives_in_monitoring_only():
     monitor = (SRC / "layouts/MonitorLayout.tsx").read_text(encoding="utf-8")
-    assert '<FeaturesSourceControl placement="header" canSwitch />' in monitor and "<FeaturesSourceBanner />" in monitor
+    fleet = (SRC / "pages/monitor/FleetPage.tsx").read_text(encoding="utf-8")
+    assert '<FeaturesSourceControl placement="inline" canSwitch />' in fleet and "<FeaturesSourceBanner />" in monitor
+    assert "FeaturesSourceControl" not in monitor and "FeaturesSourceControl" not in SHELL
     admin_files = [*(SRC / "pages/admin").rglob("*.tsx"), SRC / "layouts/AdminLayout.tsx"]
     for path in admin_files:
         text = path.read_text(encoding="utf-8")
         assert "FeaturesSource" not in text and "features-source" not in text, path.name
     control = (SRC / "components/features-source/FeaturesSourceControl.tsx").read_text(encoding="utf-8")
-    assert "placement: 'header' | 'page'; canSwitch: boolean" in control and "ConfirmDialog" in control
+    assert "placement: 'inline' | 'header' | 'page'; canSwitch: boolean" in control and "ConfirmDialog" in control
 
 
 def test_sandbox_campaigns_cost_logs_and_charts_are_gone():

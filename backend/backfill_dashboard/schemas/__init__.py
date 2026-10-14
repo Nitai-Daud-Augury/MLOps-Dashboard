@@ -1,5 +1,5 @@
 from .scan_schemas import ScanRequest
-from .action_schemas import CancelMonthRequest, LogsRequest
+from .action_schemas import CancelMonthRequest, LogsRequest, ReleaseMonthLockRequest
 from .backfill_schemas import (
     AllMachinesBackfillRequest,
     MonthPlanRequest,
@@ -22,7 +22,7 @@ __all__ = [
     "LogsRequest", "MachineManifestRequestModel",
     "DailyGapManifestRequestModel",
     "MonthPlanRequest", "MultiMachineManifestRequestModel", "OrchestratedBackfillRequest",
-    "OrchestratedManifestRequest", "SplitModel",
+    "OrchestratedManifestRequest", "ReleaseMonthLockRequest", "SplitModel",
     "ScanRequest", "TerminateParamsModel",
     "TerminateWorkflowRequest", "TriggerParamsModel", "TriggerWorkflowRequest",
     "WorkflowSourceModel",

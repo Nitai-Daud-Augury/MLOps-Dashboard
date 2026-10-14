@@ -47,10 +47,13 @@ sync:
 variables:
   app_name:
     description: App name selected per deployment target.
-  mongodb_secret_scope:
-    description: Existing Databricks secret scope containing the Mongo connection string.
+  dashboard_secret_scope:
+    description: >-
+      Existing Databricks secret scope holding all of the dashboard's secrets (mlops-dashboard):
+      the Mongo URL, the FST account key and, when bound, github_dispatch_token. Renamed from
+      mongodb_secret_scope; the value is unchanged.
   mongodb_secret_key:
-    description: Secret key in the selected scope containing MONGODB_URL.
+    description: Secret key in dashboard_secret_scope containing the Mongo connection string (MONGODB_URL).
 
 targets:
   dev:

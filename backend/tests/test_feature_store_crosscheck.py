@@ -570,3 +570,46 @@ def test_api_and_data_sources_expose_staleness(monkeypatch):
     assert block["last_run"]["staleness_status"] == "ok" and block["last_run"]["stale_months"] == 2
     line = format_data_sources_log(describe_data_sources(Settings(), None, "off", None))
     assert f"feature_store_bronze_table={DEFAULT_BRONZE_TABLE}" in line and "crosscheck_staleness_gate=on" in line
+
+
+def test_data_sources_links_are_plain_urls_without_credentials(monkeypatch, tmp_path):
+    """Data source page links: host only (no path/query/token), table name, repo and file paths."""
+    from backfill_dashboard.config import Settings
+    from backfill_dashboard.data_sources import describe_data_sources
+
+    monkeypatch.setenv("DATABRICKS_HOST", "https://adb-123.4.azuredatabricks.net/?o=9&token=dapiSECRET")
+    links = describe_data_sources(Settings(), None, "off", None)["links"]
+    assert links["databricks_host"] == "https://adb-123.4.azuredatabricks.net"
+    assert links["feature_store_table"].count(".") == 2
+    assert links["test_machines_source"].endswith("test_machine_ids.txt")
+    assert "/" in links["repo"] and links["repo_ref"]
+    assert "SECRET" not in str(links) and "token" not in str(links)
+
+    monkeypatch.delenv("DATABRICKS_HOST")
+    cfg = tmp_path / "cfg"
+    cfg.write_text("[p1]\nhost = adb-9.azuredatabricks.net\ntoken = dapiSECRET\n", encoding="utf-8")
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+    monkeypatch.setenv("DATABRICKS_PROFILE", "p1")
+    links = describe_data_sources(Settings(), None, "off", None)["links"]
+    assert links["databricks_host"] == "https://adb-9.azuredatabricks.net" and "SECRET" not in str(links)
+
+
+def test_data_sources_links_host_follows_lifecycle_profile(monkeypatch, tmp_path):
+    """No DATABRICKS_HOST/PROFILE in env: host comes from the lifecycle inventory (config or profile), hostname only."""
+    from types import SimpleNamespace
+
+    from backfill_dashboard.config import Settings
+    from backfill_dashboard.data_sources import describe_data_sources
+
+    monkeypatch.delenv("DATABRICKS_HOST", raising=False)
+    monkeypatch.delenv("DATABRICKS_PROFILE", raising=False)
+    cfg = tmp_path / "cfg"
+    cfg.write_text("[DEFAULT]\n[mlops-dev]\nhost = https://adb-7.2.azuredatabricks.net/\ntoken = dapiSECRET\n", encoding="utf-8")
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+    inv = SimpleNamespace(profile="mlops-dev", table="a.b.c", warehouse_id="w")
+    links = describe_data_sources(Settings(), inv, "ok", None)["links"]
+    assert links["databricks_host"] == "https://adb-7.2.azuredatabricks.net"
+    inv._config = SimpleNamespace(host="https://adb-8.3.azuredatabricks.net/path?token=dapiSECRET", token="dapiSECRET")
+    links = describe_data_sources(Settings(), inv, "ok", None)["links"]
+    assert links["databricks_host"] == "https://adb-8.3.azuredatabricks.net"
+    assert "SECRET" not in str(links)

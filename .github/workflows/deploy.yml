@@ -68,7 +68,10 @@ jobs:
       DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
       DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
       DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-      BUNDLE_VAR_mongodb_secret_scope: ${{ vars.MONGODB_SECRET_SCOPE }}
+      # DASHBOARD_SECRET_SCOPE replaces MONGODB_SECRET_SCOPE (same value, mlops-dashboard). The legacy
+      # variable is a temporary fallback so deploys keep working until the new one is added; remove the
+      # fallback once both GitHub Environments have DASHBOARD_SECRET_SCOPE.
+      BUNDLE_VAR_dashboard_secret_scope: ${{ vars.DASHBOARD_SECRET_SCOPE || vars.MONGODB_SECRET_SCOPE }}
       BUNDLE_VAR_mongodb_secret_key: ${{ vars.MONGODB_SECRET_KEY }}
       REQUESTED_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'dev' }}
       KEEP_RUNNING_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.keep_running || false }}
@@ -107,10 +110,18 @@ jobs:
             echo "app_name=$app_name"
             echo "keep_running=$keep_running"
           } >> "$GITHUB_OUTPUT"
+      - name: Warn when the legacy secret-scope variable is used
+        env:
+          NEW_SCOPE_VAR_SET: ${{ vars.DASHBOARD_SECRET_SCOPE != '' }}
+          LEGACY_SCOPE_VAR_SET: ${{ vars.MONGODB_SECRET_SCOPE != '' }}
+        run: |
+          if [[ "$NEW_SCOPE_VAR_SET" != "true" && "$LEGACY_SCOPE_VAR_SET" == "true" ]]; then
+            echo "::warning::Using legacy GitHub variable MONGODB_SECRET_SCOPE. Add DASHBOARD_SECRET_SCOPE (same value) to this environment, then remove MONGODB_SECRET_SCOPE."
+          fi
       - name: Check required GitHub Environment variables
         run: |
           set -euo pipefail
-          for name in DATABRICKS_HOST DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET BUNDLE_VAR_mongodb_secret_scope BUNDLE_VAR_mongodb_secret_key; do
+          for name in DATABRICKS_HOST DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET BUNDLE_VAR_dashboard_secret_scope BUNDLE_VAR_mongodb_secret_key; do
             if [[ -z "${!name:-}" ]]; then
               echo "::error::Missing required GitHub Environment variable for $name"
               exit 1

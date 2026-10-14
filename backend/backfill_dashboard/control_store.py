@@ -52,7 +52,7 @@ class BackfillControlStore(Protocol):
     def mark_requeue_requested(self, machine_id: str, month_index: int, parent_workflow_id: str, requested_by: str, *, action_id: str | None = None) -> dict: ...
     def reserve_month(self, machine_id: str, month_index: int, parent_workflow_id: str, requested_by: str) -> dict: ...
     def link_parent_workflow(self, machine_id: str, month_index: int, workflow_id: str) -> dict: ...
-    def complete_action(self, machine_id: str, month_index: int, state: str, *, replacement_workflow_id: str | None = None, error: str | None = None) -> dict: ...
+    def complete_action(self, machine_id: str, month_index: int, state: str, *, replacement_workflow_id: str | None = None, error: str | None = None, audit: dict | None = None) -> dict: ...
 
 
 class JsonControlStore:
@@ -134,10 +134,12 @@ class JsonControlStore:
     def mark_requeue_requested(self, machine_id: str, month_index: int, parent_workflow_id: str, requested_by: str, *, action_id: str | None = None) -> dict:
         return self._upsert(machine_id, month_index, lambda record: record.update({"state": "requeue_pending", "action": "requeue", "parent_workflow_id": parent_workflow_id, "requested_by": requested_by, "action_id": action_id, "events": [*record["events"], {"state": "requeue_pending", "at": _now(), "actor": requested_by}]}))
 
-    def complete_action(self, machine_id: str, month_index: int, state: str, *, replacement_workflow_id: str | None = None, error: str | None = None) -> dict:
+    def complete_action(self, machine_id: str, month_index: int, state: str, *, replacement_workflow_id: str | None = None, error: str | None = None, audit: dict | None = None) -> dict:
+        """Set the month state. ``audit`` (actor, source, reason, workflow ids) is stored on the event."""
         if state not in TERMINAL_MONTH_STATES | {"queued", "running", "stopping"}:
             raise ValueError(f"invalid month state: {state}")
-        return self._upsert(machine_id, month_index, lambda record: record.update({"state": state, "replacement_workflow_id": replacement_workflow_id or record.get("replacement_workflow_id"), "error": error, "events": [*record["events"], {"state": state, "at": _now(), **({"error": error} if error else {})}]}))
+        extra = {key: value for key, value in (audit or {}).items() if value not in (None, "")}
+        return self._upsert(machine_id, month_index, lambda record: record.update({"state": state, "replacement_workflow_id": replacement_workflow_id or record.get("replacement_workflow_id"), "error": error, "events": [*record["events"], {"state": state, "at": _now(), **({"error": error} if error else {}), **extra}]}))
 
 
 class AzureBlobControlStore(JsonControlStore):

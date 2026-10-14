@@ -45,6 +45,59 @@ def _last_crosscheck_run(summary: Any) -> dict[str, Any] | None:
     return run
 
 
+def _databricks_host(profile: str | None, lifecycle_inventory: Any = None) -> str | None:
+    """Workspace URL (scheme + host only) for explorer links; never credentials.
+
+    Order: DATABRICKS_HOST, the lifecycle inventory's already-built SDK config
+    (no new auth call), then the host of the same profile in ~/.databrickscfg.
+    """
+    from urllib.parse import urlparse
+
+    raw = (os.getenv("DATABRICKS_HOST") or "").strip()
+    if not raw:
+        cached = getattr(lifecycle_inventory, "_config", None)
+        host = getattr(cached, "host", None) if cached is not None else None
+        raw = host.strip() if isinstance(host, str) else ""
+    if not raw:
+        try:
+            import configparser
+
+            cfg = configparser.ConfigParser()
+            cfg.read(os.path.expanduser(os.getenv("DATABRICKS_CONFIG_FILE") or "~/.databrickscfg"))
+            section = (profile or "DEFAULT").strip() or "DEFAULT"
+            raw = (cfg.get(section, "host", fallback="") or "").strip()
+        except Exception:
+            raw = ""
+    if not raw:
+        return None
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    return f"https://{parsed.hostname}" if parsed.hostname else None
+
+
+def _links_info(settings: Any, lifecycle_inventory: Any = None) -> dict[str, Any]:
+    """Non-secret locations the UI turns into links (Data source page)."""
+    from .feature_store_crosscheck import feature_store_table
+
+    # Same profile resolution as the lifecycle inventory (factory: settings.databricks_profile).
+    profile = (
+        getattr(lifecycle_inventory, "profile", None)
+        or (getattr(settings, "databricks_profile", "") or "").strip()
+        or (os.getenv("DATABRICKS_PROFILE") or "").strip()
+        or None
+    )
+    try:
+        table: str | None = feature_store_table()
+    except ValueError:
+        table = None  # invalid config is reported by features_crosscheck
+    return {
+        "databricks_host": _databricks_host(profile, lifecycle_inventory),
+        "feature_store_table": table,
+        "test_machines_source": _inventory_source(getattr(settings, "test_machine_ids_file", "data/test_machine_ids.txt")),
+        "repo": (os.getenv("GITHUB_DISPATCH_REPO") or "Nitai-Daud-Augury/MLOps-Dashboard").strip(),
+        "repo_ref": (os.getenv("DASHBOARD_REPO_REF") or "main").strip(),
+    }
+
+
 def describe_data_sources(
     settings: Any,
     lifecycle_inventory: Any,
@@ -92,6 +145,7 @@ def describe_data_sources(
                 "Disabled while FEATURES_SOURCE=databricks (statuses already come from feature_store)."
             )
     info["features_crosscheck"] = crosscheck
+    info["links"] = _links_info(settings, lifecycle_inventory)
     return info
 
 

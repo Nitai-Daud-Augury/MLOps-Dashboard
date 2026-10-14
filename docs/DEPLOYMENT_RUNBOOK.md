@@ -52,8 +52,12 @@ start a shared app until those owners approve the target workspace and costs.
    |---|---|
    | `DATABRICKS_HOST` | Workspace host URL for that environment. |
    | `DATABRICKS_CLIENT_ID` | Databricks service principal application/client ID. |
-   | `MONGODB_SECRET_SCOPE` | Existing Databricks secret scope name for that app/workspace. |
-   | `MONGODB_SECRET_KEY` | Secret key name containing the Mongo connection string. |
+   | `DASHBOARD_SECRET_SCOPE` | Existing Databricks secret scope holding all dashboard secrets (`mlops-dashboard`): Mongo URL, FST account key, GitHub dispatch token. |
+   | `MONGODB_SECRET_KEY` | Secret key name (in that scope) containing the Mongo connection string (`mongodb_url`). |
+
+   `DASHBOARD_SECRET_SCOPE` replaced `MONGODB_SECRET_SCOPE` (same value). The deploy workflow still
+   falls back to `MONGODB_SECRET_SCOPE` and logs a warning when it does; remove the legacy variable
+   once `DASHBOARD_SECRET_SCOPE` is set in both environments.
 
    These variables contain resource identifiers, not Mongo credentials. Never create a GitHub
    variable or workflow input for the Mongo URI itself.
@@ -411,12 +415,12 @@ mismatch -> 409, bad parameters -> 422, timeout -> 504, other Metaflow/Outerboun
    ```yaml
         - name: outerbounds_sp_auth_key
           secret:
-            scope: ${var.mongodb_secret_scope}
+            scope: ${var.dashboard_secret_scope}
             key: outerbounds_sp_auth_key
             permission: READ
         - name: outerbounds_sp_config_url
           secret:
-            scope: ${var.mongodb_secret_scope}
+            scope: ${var.dashboard_secret_scope}
             key: outerbounds_sp_config_url
             permission: READ
    ```
@@ -547,6 +551,56 @@ manual Actions-tab dispatch cannot hit production), `OB_DISPATCH_INCLUDE_PARAMS=
    check). With `OUTERBOUNDS_PROBE_GHA_DISPATCH=1` and *Include GitHub Actions dispatch* it runs
    `action=list_runs` end to end.
 
+### 4f1. Month locks and parent/child runs (GitHub Actions backend)
+
+**Month locks.** Each submitted month has a control-store record
+(`dashboard-control/<machine>/month_<index>.json` in `aifleetmlopsfstbackfill/fst-backfill`, or the
+Databricks table when `BACKFILL_CONTROL_STORE=databricks`). It is reserved `queued`, linked to the
+parent Argo id, and blocks another backfill of that machine while it is active
+(`queued`/`running`/`cancel_requested`/`stopping`/`requeue_pending`). A terminated parent never
+writes a terminal state itself, so the app releases the lock (`backend/backfill_dashboard/month_locks.py`):
+
+| When | Rule |
+|---|---|
+| A terminate dispatch succeeds | the terminated workflow's months -> `cancelled` (even if the cached snapshot still says Running) |
+| Every `list_runs` snapshot, every machine Running tab read, and before every submission guard | months whose workflow is `Succeeded` -> `completed`, `Failed`/`Error` -> `failed`; a workflow absent from the snapshot is released only if the action ledger knows it is terminal (successful terminate, or trigger synced to failed/succeeded) |
+| Safety net | a lock whose workflow the latest status does not show active is released (`failed`, `source=stale_ttl`) after `BACKFILL_MONTH_LOCK_STALE_TTL_SECONDS` (default 86400; `0` disables; clamped 900 s – 30 days). Set it above the longest expected parent run |
+
+A workflow the latest status shows as active is never released. `requeue_pending` (owned by the
+replacement waiter) and in-flight submissions (`action:<id>`, see `BACKFILL_QUEUED_SUBMISSION_TTL_SECONDS`)
+are left to their own paths except for the TTL. Every release appends an event with
+`source`/`actor`/`released_from` and logs `[month-locks] released ...`.
+
+**Clearing one stale lock by hand.** Admin-only endpoint (no UI button yet):
+
+```bash
+# 1. Preview (dry_run defaults to true; nothing is written). Refuses with 409 while the latest
+#    status shows the record's parent/child active, while its dispatch is still pending, or before
+#    the first status snapshot (click Refresh in Live Ops first).
+curl -X POST "$APP/api/admin/backfills/<machine_id>/months/<month_index>/release-lock" \
+     -H 'content-type: application/json' -d '{}'
+# 2. Release: confirm must be exactly "<machine_id>:<YYYY-MM>", reason is required.
+curl -X POST "$APP/api/admin/backfills/<machine_id>/months/<month_index>/release-lock" \
+     -H 'content-type: application/json' \
+     -d '{"dry_run": false, "confirm": "<machine_id>:<YYYY-MM>", "reason": "parent terminated"}'
+```
+
+The record becomes `cancelled` with an audit event (actor = signed-in user, reason, previous state,
+latest status); the admin action ledger gets a `release_lock` entry and the log a
+`[month-locks] admin release` line.
+
+**Parent/child runs.** `list_runs` keeps only runs submitted from the allowlisted deployments
+(`OB_DISPATCH_DEPLOYMENTS`, name prefix `<deployment>-`), scanning up to `OB_LIST_SCAN_LIMIT`
+(default 200) runs per flow for `limit` matches, so the FSTBackfill children
+(`fstbackfill.test.devfstmon.fstbackfill-mrqqu-*`) appear next to the orchestrator. Argo exposes no
+parent id on a child, so each entry carries a machine-free `link` derived from its parameters: the
+dashboard manifest batch directory (`<yyyy>/<mm>/<dd>/dashboard/orchestrator/<hhmmss_us>`) plus the
+child's month (index, year, month). The app matches a child's batch to the parent's
+`manifest_template` (snapshot row or its own trigger action) and attaches `parent_workflow_id`, the
+month and the machine from the parent's own `machine_month_indices` plan. Live Ops and the machine
+Running tab list children indented under their parent. The `list_runs` change lives in
+`scripts/ob_dispatch.py`, which the workflow runs from `main`: it takes effect once merged.
+
 ### 4f2. Scan results persistence (`SCAN_SNAPSHOT_STORE`)
 
 After every successful scan the snapshot is saved, in a versioned envelope
@@ -621,7 +675,7 @@ the repository does not set or switch profiles. Select a real, pre-created secre
 locally as bundle variables; these are identifiers only, not the URI:
 
 ```bash
-export BUNDLE_VAR_mongodb_secret_scope='<approved-secret-scope>'
+export BUNDLE_VAR_dashboard_secret_scope='<approved-secret-scope>'   # mlops-dashboard
 export BUNDLE_VAR_mongodb_secret_key='<approved-secret-key>'
 
 databricks bundle validate --target dev
@@ -751,7 +805,7 @@ not performed as part of this code change.
 |---|---|
 | App never reaches `RUNNING` / crashes | Inspect `databricks apps logs <app-name> --tail-lines 200`; confirm `app.yaml` command, root `package.json` build, Python deps, the Mongo resource key, and app port. Retry only after fixing the reported startup issue. |
 | OIDC fails in GitHub | Check exact `DATABRICKS_HOST` and service principal client ID environment variables, `id-token: write`, workflow Environment name, issuer/audience, repository/environment subject, and service principal workspace rights. No PAT fallback is configured. |
-| Bundle says variable missing | Confirm `MONGODB_SECRET_SCOPE` and `MONGODB_SECRET_KEY` are set on the selected GitHub Environment; local bundle operators need `BUNDLE_VAR_mongodb_secret_scope` and `BUNDLE_VAR_mongodb_secret_key`. Values are names, not Mongo credentials. |
+| Bundle says variable missing | Confirm `DASHBOARD_SECRET_SCOPE` (or, temporarily, the legacy `MONGODB_SECRET_SCOPE`) and `MONGODB_SECRET_KEY` are set on the selected GitHub Environment; local bundle operators need `BUNDLE_VAR_dashboard_secret_scope` and `BUNDLE_VAR_mongodb_secret_key` (or `--var dashboard_secret_scope=... --var mongodb_secret_key=...`). Values are names, not Mongo credentials. |
 | Lifecycle status is `unauthorized`, unavailable, or expired | Check the secret scope/key, resource binding, secret rotation/expiry, Mongo user grants, and app network path. Refresh/rotate Mongo auth only when status reports unauthorized/unavailable/expired, or when the deployed secret was rotated. Update the secret securely and restart/redeploy the app so its resource-backed environment is refreshed. A healthy status does not require refreshing Mongo auth. |
 | Mongo is not configured | The DB URI must be set in the dedicated Databricks secret resource (`MONGODB_URL`) or local ignored `.env`; do not add it to GitHub variables or command arguments. The scanner remains fail-open, so check installation evidence before treating missing months as real gaps. |
 | FST scan returns auth/403/network errors | The bundle does not currently bind FST credentials. Ask the cloud/data owner to verify the account/container, app identity or read-only credential, Azure RBAC/SAS expiry, private endpoint/firewall rules, DNS, and outbound network policy. Do not broaden storage discovery or scan cohort as a workaround. |

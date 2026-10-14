@@ -16,10 +16,11 @@ from typing import Literal
 from uuid import uuid4
 
 from .config import EXPECTED_ULTRASONIC_V2_COLUMNS
+from .run_links import argo_parameters, link_from_parameters
 
 
 SourceType = Literal["local", "github"]
-WorkflowAction = Literal["create", "trigger", "logs", "manifest", "terminate"]
+WorkflowAction = Literal["create", "trigger", "logs", "manifest", "terminate", "release_lock"]
 EnvironmentTarget = Literal["dev", "prod"]
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
@@ -99,6 +100,14 @@ class RunningWorkflow:
     finished_at: str | None
     outerbounds_url: str
     machine_ids: list[str] = field(default_factory=list)
+    # Parent/child linkage (run_links.py): an FSTBackfill child names its ULRPM parent's
+    # manifest batch and its month; the app resolves the parent and the machine.
+    link_role: str | None = None
+    manifest_batch: str | None = None
+    month_index: int | None = None
+    year: int | None = None
+    month: int | None = None
+    parent_workflow_id: str | None = None
 
 
 @dataclass
@@ -1068,6 +1077,8 @@ def parse_running_workflows(payload: object) -> list[RunningWorkflow]:
         flow_name = annotations.get("metaflow/flow_name", "")
         branch = annotations.get("metaflow/branch_name") or annotations.get("git/branch") or annotations.get("branch")
         run_id = annotations.get("metaflow/run_id", f"argo-{name}")
+        link = item.get("link") if isinstance(item.get("link"), dict) else link_from_parameters(argo_parameters(item))
+        link = link or {}
         workflows.append(
             RunningWorkflow(
                 workflow_id=name,
@@ -1080,6 +1091,11 @@ def parse_running_workflows(payload: object) -> list[RunningWorkflow]:
                 finished_at=status.get("finishedAt"),
                 outerbounds_url=_outerbounds_run_url(flow_name, run_id),
                 machine_ids=_machine_ids_from_workflow(item),
+                link_role=link.get("role"),
+                manifest_batch=link.get("manifest_batch"),
+                month_index=link.get("month_index"),
+                year=link.get("year"),
+                month=link.get("month"),
             )
         )
     return workflows

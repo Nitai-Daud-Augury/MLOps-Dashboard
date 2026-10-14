@@ -11,12 +11,12 @@ resources:
       resources:
         - name: mongodb_url
           secret:
-            scope: ${var.mongodb_secret_scope}
+            scope: ${var.dashboard_secret_scope}
             key: ${var.mongodb_secret_key}
             permission: READ
         - name: fst_account_key
           secret:
-            scope: ${var.mongodb_secret_scope}
+            scope: ${var.dashboard_secret_scope}
             key: fst_prod_account_key
             permission: READ
         # Serverless Starter Warehouse already attached in the mlops-dashboard-dev
@@ -31,7 +31,7 @@ resources:
         # the scope of every target's workspace, or the deploy fails.
         - name: github_dispatch_token
           secret:
-            scope: ${var.mongodb_secret_scope}
+            scope: ${var.dashboard_secret_scope}
             key: github_dispatch_token
             permission: READ
         # Backfill manifest + control-store credential: a container-scoped SAS
@@ -40,6 +40,6 @@ resources:
         # FST read store above. Create the key BEFORE deploying, or the deploy fails.
         - name: fst_backfill_manifest_sas
           secret:
-            scope: ${var.mongodb_secret_scope}
+            scope: ${var.dashboard_secret_scope}
             key: fst_backfill_manifest_sas
             permission: READ

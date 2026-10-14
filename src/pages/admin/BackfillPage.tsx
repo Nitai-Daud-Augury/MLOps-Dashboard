@@ -1,4 +1,4 @@
-import { Send, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Send, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { DEFAULT_DEV_NAMESPACE, PROD_CONFIRMATION } from '../../constants';
@@ -15,13 +15,13 @@ import { isTriggerPreparationActive } from '../../features/backfill/submissionHe
 import type { SplitSpec } from '../../features/backfill/types';
 import { inclusiveEndDateToExclusiveUntil, previewWindows, startDateToSince } from '../../features/backfill/windows';
 import { errorText, postJson, useResource } from '../../lib/api';
-import { plural } from '../../lib/format';
+import { monthLabel, plural } from '../../lib/format';
 import { useStatus } from '../../state/statusStore';
 import type { MachineStatus } from '../../types';
 import type { AdminAction, AdminReadiness, AdminSpec, BackfillScope, BusyMachineInfo, EnvironmentTarget, ManifestResult, TriggerParams } from '../../types';
 import { orchestratorMonthIndex } from '../../utils';
 
-const STEPS = ['Scope', 'Range / split', 'Estimate review', 'Submit', 'Track'];
+const STEPS = ['Machines', 'Dates & split', 'Settings', 'Review'];
 const TRACK = [
   { phase: 'cancel_window', label: 'Queued' }, { phase: 'validating', label: 'Validating' }, { phase: 'preparing_manifests', label: 'Manifests' },
   { phase: 'submitting', label: 'Dispatching' }, { phase: 'accepted', label: 'Submitted' },
@@ -59,6 +59,7 @@ export function BackfillPage() {
   const [prodConfirmed, setProdConfirmed] = useState(false);
   const [namespace, setNamespace] = useState('');
   const [reviewed, setReviewed] = useState(false);
+  const [wizStep, setWizStep] = useState(1);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [action, setAction] = useState<AdminAction | null>(null);
@@ -165,7 +166,14 @@ export function BackfillPage() {
     catch (exc) { notify('error', errorText(exc)); } finally { setCancelling(false); }
   };
 
-  const step = action ? 5 : reviewed ? 4 : targetIds.length && partitions ? 3 : targetIds.length ? 2 : 1;
+  const step = wizStep;
+  const stepBlockers: Record<number, string[]> = {
+    1: [...(targetIds.length === 0 ? ['Select at least one machine.'] : []), ...(targetIds.some(isLocked) ? ['A selected machine already has an active backfill.'] : []), ...(lockLoading ? ['Machine backfill locks are still loading.'] : [])],
+    2: [...(monthMode === 'range' && (!since || !until) ? ['Choose a start and end day.'] : []), ...(partitions === 0 && targetIds.length ? ['No online, backfillable months in this selection.'] : [])],
+    3: environment === 'prod' && !prodConfirmed ? ['Confirm the production run.'] : [],
+  };
+  const canNext = !(stepBlockers[step] ?? []).length;
+  const goTo = (next: number) => { setWizStep(next); setReviewed(next === 4); };
   const visible = machines.filter((m) => m.machine_id.toLowerCase().includes(search.trim().toLowerCase()) || (m.display_name ?? '').toLowerCase().includes(search.trim().toLowerCase()));
   const toggle = (id: string) => setSelected((current) => scope === 'one' ? [id] : current.includes(id) ? current.filter((x) => x !== id) : [...current, id]);
 
@@ -173,7 +181,8 @@ export function BackfillPage() {
   return <>
     <PageHeader title="Backfill" purpose="Fill missing feature months for one, some, or all machines. Months for one machine always run in order; the backend re-checks locks and duplicates." />
     <Banner tone="warn" title={`ADMIN: this dispatches real workflows (env: ${environment} · ns: ${environment === 'prod' ? 'production' : ns}).`} />
-    <ol className="stepper" aria-label="Progress">{STEPS.map((label, i) => <li key={label} className={i + 1 < step ? 'done' : i + 1 === step ? 'current' : ''}><span className="step-num">{i + 1 < step ? '✓' : i + 1}</span>{label}</li>)}</ol>
+    {!action ? <ol className="stepper wizard-steps" aria-label="Steps">{STEPS.map((label, i) => <li key={label} className={i + 1 < step ? 'done' : i + 1 === step ? 'current' : ''}>
+      <button type="button" className="step-btn" disabled={i + 1 > step} aria-current={i + 1 === step ? 'step' : undefined} onClick={() => goTo(i + 1)}><span className="step-num">{i + 1 < step ? '✓' : i + 1}</span>{label}</button></li>)}</ol> : null}
 
     {action ? <section className="panel">
       <div className="panel-head"><div><h2>Track</h2><p className="helper">Live phase of the submission until the workflow backend accepts it.</p></div><span className="mono muted">{action.id.slice(0, 12)} · <Timestamp value={action.created_at} /></span></div>
@@ -184,12 +193,12 @@ export function BackfillPage() {
         {canCancelBeforeSubmit(action) ? <button type="button" className="btn btn-danger-outline" onClick={() => void cancel()} disabled={cancelling}>{cancelling ? <Spinner /> : <X size={14} />}Cancel before dispatch</button> : null}
         {action.outerbounds_url ? <a className="btn" href={action.outerbounds_url} target="_blank" rel="noreferrer">Open in Outerbounds</a> : null}
         <Link className="btn" to="/monitor/live">Open Live Ops</Link>
-        {!preparing ? <button type="button" className="btn" onClick={() => { setAction(null); setReviewed(false); }}>New backfill</button> : null}
+        {!preparing ? <button type="button" className="btn" onClick={() => { setAction(null); goTo(1); }}>New backfill</button> : null}
       </div>
     </section> : null}
 
-    <section className="panel" aria-labelledby="scope-h">
-      <div className="panel-head"><div><h2 id="scope-h">1 · Scope</h2><p className="helper">Pick the machines to backfill. Busy machines already have a backfill running and cannot be selected.</p></div>
+    {!action && step === 1 ? <><section className="panel" aria-labelledby="scope-h">
+      <div className="panel-head"><div><h2 id="scope-h">Machines</h2><p className="helper">Busy machines already have a backfill running.</p></div>
         <div className="fs-control" role="radiogroup" aria-label="Scope">{(['one', 'selected', 'all'] as BackfillScope[]).map((value) =>
           <button key={value} type="button" role="radio" aria-checked={scope === value} className={`seg${scope === value ? ' seg-on' : ''}`}
             onClick={() => { setScope(value); setSelected((s) => value === 'one' ? s.slice(0, 1) : s); }}>{value === 'one' ? 'One machine' : value === 'selected' ? 'Selected' : 'All machines'}</button>)}</div>
@@ -204,55 +213,66 @@ export function BackfillPage() {
           { key: 'pick', header: <span className="sr-only">Select</span>, cell: (m) => <input type={scope === 'one' ? 'radio' : 'checkbox'} name="machine" aria-label={`Select ${m.machine_id}`} checked={selected.includes(m.machine_id)}
             disabled={isLocked(m.machine_id) || lockLoading} onClick={(e) => e.stopPropagation()} onChange={() => toggle(m.machine_id)} /> },
           { key: 'machine', header: 'Machine', cell: (m) => <MachineTitle machine={m} />, sort: (a, b) => (a.display_name || a.machine_id).localeCompare(b.display_name || b.machine_id) },
-          { key: 'status', header: 'Status', cell: (m) => <MachineStatusBadge machine={m} />, sort: (a, b) => a.status.localeCompare(b.status) },
+          { key: 'status', header: 'Status', cell: (m) => <MachineStatusBadge machine={m} />, sort: (a, b) => (a.status ?? '').localeCompare(b.status ?? '') },
           { key: 'coverage', header: 'Coverage', optional: true, cell: (m) => <Meter done={m.months_complete} total={m.months_expected} /> },
           { key: 'lock', header: 'Backfill', cell: (m) => lockLoading ? <span className="muted"><Spinner /> Checking…</span> : isLocked(m.machine_id) ? <StatusBadge tone="running" label="Busy" title={busy?.[m.machine_id]?.workflow_id} /> : <StatusBadge tone="success" label="Ready" /> },
         ] satisfies Column<MachineStatus>[]} /></div> : null}
       {locks.error ? <p className="field-error">Lock status unavailable: {locks.error}</p> : null}
-    </section>
+    </section></> : null}
 
-    <section className="panel" aria-labelledby="range-h">
-      <div className="panel-head"><div><h2 id="range-h">2 · Range and split</h2><p className="helper">Which months to fill, how each month is split into manifest windows, and where it runs.</p></div></div>
+    {!action && step === 2 ? <section className="panel" aria-labelledby="range-h">
+      <div className="panel-head"><div><h2 id="range-h">Dates and split</h2><p className="helper">Which months to fill, and how each month is cut into work windows.</p></div></div>
       <div className="form-row">
         <label className="field">Months<select value={monthMode} onChange={(e) => setMonthMode(e.target.value as MonthMode)}>
-          <option value="gaps">Gaps only (needs backfill)</option><option value="all">All backfillable months</option><option value="range">Date range</option></select></label>
+          <option value="gaps">Missing months only</option><option value="all">All backfillable months</option><option value="range">Date range</option></select></label>
         {monthMode === 'range' ? <>
           <label className="field">Start day<input type="date" value={startDay} onChange={(e) => setStartDay(e.target.value)} /></label>
           <label className="field">End day (inclusive)<input type="date" value={endDay} onChange={(e) => setEndDay(e.target.value)} /></label></> : null}
         <label className="field">Split<select value={split.mode} onChange={(e) => setSplit({ mode: e.target.value as SplitSpec['mode'], days: split.days ?? 3 })}>
           <option value="month">Monthly</option><option value="week">Weekly</option><option value="day">Daily</option><option value="days">Every N days</option></select></label>
         {split.mode === 'days' ? <label className="field">N days<input type="number" min={1} max={31} value={split.days ?? 3} onChange={(e) => setSplit({ mode: 'days', days: Number(e.target.value) })} /></label> : null}
-        {scope !== 'one' ? <label className="field">Machines in parallel<input type="number" min={1} max={maxConcurrency} value={effectiveConcurrency} onChange={(e) => setConcurrency(Number(e.target.value))} /></label> : null}
+      </div>
+      <p className="helper">Split sets the size of each manifest window: smaller windows mean more, shorter jobs (easier retries). Months of one machine always run in order.{split.mode !== 'month' ? ' Day/week/N-day splits need orchestrator contract v5.' : ''}</p>
+      <p><strong>{plural(partitions, 'month')}</strong> · <strong>{plural(windows, 'window')}</strong></p>
+    </section> : null}
+
+    {!action && step === 3 ? <section className="panel" aria-labelledby="env-h">
+      <div className="panel-head"><div><h2 id="env-h">Settings</h2><p className="helper">Where the backfill runs.</p></div></div>
+      <div className="form-row">
         <label className="field">Environment<select value={environment} onChange={(e) => { setEnvironment(e.target.value as EnvironmentTarget); setProdConfirmed(false); }}>
           <option value="dev">dev</option><option value="prod">prod</option></select></label>
         {environment === 'dev' ? <label className="field">Namespace<input value={namespace} placeholder={ns} onChange={(e) => setNamespace(e.target.value)} /></label>
           : <label className="check"><input type="checkbox" checked={prodConfirmed} onChange={(e) => setProdConfirmed(e.target.checked)} />I confirm a PRODUCTION backfill</label>}
+        {scope !== 'one' ? <label className="field">Machines in parallel<input type="number" min={1} max={maxConcurrency} value={effectiveConcurrency} onChange={(e) => setConcurrency(Number(e.target.value))} /></label> : null}
       </div>
-      {split.mode !== 'month' ? <p className="muted">Day/week/N-day splits need the orchestrator contract v5.</p> : null}
-    </section>
+    </section> : null}
 
-    <section className="panel" aria-labelledby="review-h">
-      <div className="panel-head"><div><h2 id="review-h">3 · Estimate review</h2><p className="helper">Check the size of the run before submitting. Any edit above resets the review.</p></div>
-        <button type="button" className="btn" disabled={!targetIds.length} onClick={() => setReviewed(true)}>{reviewed ? 'Reviewed ✓' : 'Review estimate'}</button></div>
-      <p><strong>{plural(planned.length, 'machine')}</strong> · <strong>{plural(partitions, 'month')}</strong> · <strong>{plural(windows, 'manifest window')}</strong> · {effectiveConcurrency} machine(s) at a time, months sequential per machine.</p>
-      {reviewed && planned.length ? <details open={planned.length <= 10}><summary>Per-machine months</summary><ul>{Object.entries(plan).map(([id, indices]) => {
+    {!action && step === 4 ? <section className="panel" aria-labelledby="review-h">
+      <div className="panel-head"><div><h2 id="review-h">Review</h2><p className="helper">Check everything, then submit. You can cancel until it is dispatched.</p></div></div>
+      <dl className="dl review-dl">
+        <dt>Machines</dt><dd>{plural(planned.length, 'machine')}{scope !== 'one' ? ` · ${effectiveConcurrency} at a time` : ''}</dd>
+        <dt>Months</dt><dd>{plural(partitions, 'month')} ({monthMode === 'gaps' ? 'missing only' : monthMode === 'all' ? 'all backfillable' : `${startDay} → ${endDay}`})</dd>
+        <dt>Split</dt><dd>{split.mode === 'days' ? `every ${split.days} days` : split.mode === 'month' ? 'monthly' : split.mode === 'week' ? 'weekly' : 'daily'} · {plural(windows, 'window')}</dd>
+        <dt>Environment</dt><dd>{environment}{environment === 'dev' ? ` · ${ns}` : ' · production'}</dd>
+      </dl>
+      {planned.length ? <details open={planned.length <= 5}><summary>Months per machine</summary><ul>{Object.entries(plan).map(([id, indices]) => {
         const machine = machines.find((m) => m.machine_id === id);
-        const labels = machine?.months.filter((m) => indices.includes(orchestratorMonthIndex(m.partition))).map((m) => m.partition.label) ?? [];
-        return <li key={id}><span className="mono">{id}</span>: {labels.join(', ')}</li>;
+        const labels = machine?.months.filter((m) => indices.includes(orchestratorMonthIndex(m.partition))).map((m) => monthLabel(m.partition.year, m.partition.month)) ?? [];
+        return <li key={id}><Link className="mono" to={`/monitor/machines/${encodeURIComponent(id)}`}>{id}</Link>: {labels.join(', ')}</li>;
       })}</ul></details> : null}
-      {blockers.length ? <ul className="muted">{blockers.map((b) => <li key={b} className="wrap">{b}</li>)}</ul> : null}
-    </section>
-
-    <section className="panel" aria-labelledby="submit-h">
-      <div className="panel-head"><div><h2 id="submit-h">4 · Submit</h2><p className="helper">Dispatches the backfill (you can cancel it until it is sent), or only writes the manifests.</p></div></div>
+      {blockers.length ? <ul className="field-error">{blockers.map((b) => <li key={b} className="wrap">{b}</li>)}</ul> : null}
       {submitError ? <Banner tone="error" title="Request failed" onDismiss={() => setSubmitError(null)}>{submitError}</Banner> : null}
       {manifest ? <Banner tone="info" title="Manifests created" onDismiss={() => setManifest(null)}><span className="mono">{manifest.manifest_prefix ?? manifest.manifest_path}</span> ({manifest.manifest_count ?? manifest.rows} files)</Banner> : null}
-      <div className="toolbar">
-        <button type="button" className="btn btn-primary" onClick={() => void submit()} disabled={!reviewed || blockers.length > 0 || submitting}>
-          {submitting ? <Spinner /> : <Send size={14} />}{submitting ? 'Submitting…' : 'Submit backfill'}</button>
-        <button type="button" className="btn" onClick={() => void manifestsOnly()} disabled={!reviewed || submitting || planned.length === 0}>Create manifests only</button>
-        {!reviewed ? <span className="muted">Review the estimate first.</span> : null}
-      </div>
-    </section>
+    </section> : null}
+
+    {!action ? <div className="wizard-nav">
+      {step > 1 ? <button type="button" className="btn" onClick={() => goTo(step - 1)}><ChevronLeft size={14} />Back</button> : <span />}
+      <span className="muted wrap">{(stepBlockers[step] ?? [])[0] ?? ''}</span>
+      {step < 4 ? <button type="button" className="btn btn-primary" disabled={!canNext} onClick={() => goTo(step + 1)}>Next<ChevronRight size={14} /></button>
+        : <div className="toolbar">
+          <button type="button" className="btn" onClick={() => void manifestsOnly()} disabled={submitting || planned.length === 0}>Manifests only</button>
+          <button type="button" className="btn btn-primary" onClick={() => void submit()} disabled={!reviewed || blockers.length > 0 || submitting}>
+            {submitting ? <Spinner /> : <Send size={14} />}{submitting ? 'Submitting…' : 'Submit backfill'}</button></div>}
+    </div> : null}
   </>;
 }

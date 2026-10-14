@@ -8,7 +8,7 @@ const DAY_MS = 24 * 3600_000;
  */
 export function finishedWithin(workflows: RunningWorkflow[], statuses: string[], windowMs = DAY_MS, now = Date.now()): RunningWorkflow[] {
   return workflows.filter((w) => {
-    if (!statuses.includes(w.status.toLowerCase())) return false;
+    if (!statuses.includes((w.status ?? '').toLowerCase())) return false;
     const stamp = Date.parse(w.finished_at ?? w.started_at ?? w.created_at ?? '');
     return Number.isFinite(stamp) && now - stamp <= windowMs;
   });
