@@ -8,7 +8,7 @@ import { MachineFacts, MachineStatusBadge, MachineTitle } from '../../features/m
 import { MonthGrid } from '../../features/machines/MonthGrid';
 import { phaseLabel } from '../../features/backfill/actions';
 import { useWorkflowSummary } from '../../features/workflows/useWorkflowSummary';
-import { workflowSort } from '../../features/workflows/sort';
+import { nestChildren, workflowSort } from '../../features/workflows/sort';
 import { WorkflowTable } from '../../features/workflows/WorkflowTable';
 import { useResource } from '../../lib/api';
 import { monthLabel } from '../../lib/format';
@@ -73,7 +73,7 @@ export function MachinePage() {
         actions={<><span className="muted">{summary.data?.fetched_at ? <Timestamp value={summary.data.fetched_at} prefix="Status fetched" /> : 'Status not fetched yet'}</span>
           <RefreshButton onClick={() => void refreshRunning()} fetching={summary.fetching} retryIn={summary.retryIn} /></>}>
         {summary.refreshError ? <p className="field-error">{summary.refreshError}</p> : null}
-        <WorkflowTable workflows={runningForMachine} loading={summary.loading} defaultSize={10} empty={<p className="muted">No running or pending workflows for this machine.</p>} />
+        <WorkflowTable workflows={nestChildren(runningForMachine)} loading={summary.loading} defaultSize={10} empty={<p className="muted">No running or pending workflows for this machine.</p>} />
       </Section>
       <Section title="Active months" description="Month locks held by a running backfill for this machine.">
         {active.loading ? <p className="muted"><Spinner /> Loading month locks…</p> : active.error ? <ErrorState message={active.error} onRetry={() => void reloadActive()} />

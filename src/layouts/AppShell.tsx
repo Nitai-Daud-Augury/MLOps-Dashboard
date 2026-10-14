@@ -7,6 +7,7 @@ import { isFinishedWorkflow } from '../lib/status';
 import { useStatus } from '../state/statusStore';
 import type { WorkflowSummaryPayload } from '../types';
 import { readCachedJson } from '../utils/cache';
+import { ErrorBoundary } from '../components/ui/ErrorBoundary';
 
 function useTheme(): [boolean, () => void] {
   const [dark, setDark] = useState(() => localStorage.getItem('ulrpm-theme') === 'dark');
@@ -75,16 +76,16 @@ export function AppShell({ mode, headerExtra, ribbon, banners }: { mode: 'monito
   const generated = payload?.snapshot.machines.length ? payload.snapshot.generated_at : null;
   const close = () => setMobileOpen(false);
   return <div className={`shell${collapsed ? ' collapsed' : ''}${mobileOpen ? ' mobile-open' : ''}`} data-mode={mode}>
-    <aside className="sidebar" aria-label="Primary">
+    <div className="sidebar-rail"><aside className="sidebar" aria-label="Primary">
       <Link to="/monitor" className="brand" style={{ color: 'inherit', textDecoration: 'none' }} onClick={close}>
         <span className="brand-mark"><Waves size={16} /></span><span className="brand-name">Drift Dashboard</span></Link>
-      <nav aria-label="Monitoring" style={{ display: 'grid', gap: 2 }}>
+      <nav aria-label="Monitoring">
         <div className="nav-group"><span>Monitoring</span></div>
         <NavItem to="/monitor" end icon={<LayoutGrid size={18} />} label="Fleet coverage" onNavigate={close} />
         <NavItem to="/monitor/live" icon={<Activity size={18} />} label="Live Ops" badge={counts.active} onNavigate={close} />
         <NavItem to="/monitor/source" icon={<Database size={18} />} label="Data source" onNavigate={close} />
       </nav>
-      <nav aria-label="Admin" style={{ display: 'grid', gap: 2 }}>
+      <nav aria-label="Admin" className="nav-section-admin">
         <div className="nav-group admin"><ShieldAlert size={12} aria-hidden="true" /><span>Admin</span></div>
         <NavItem admin to="/admin" end icon={<Gauge size={18} />} label="Overview" onNavigate={close} />
         <NavItem admin to="/admin/backfill" icon={<PlayCircle size={18} />} label="Backfill" onNavigate={close} />
@@ -98,7 +99,7 @@ export function AppShell({ mode, headerExtra, ribbon, banners }: { mode: 'monito
       <button type="button" className="nav-item only-desktop" style={{ border: 0, background: 'transparent', cursor: 'pointer', font: 'inherit' }}
         onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
         {collapsed ? <ChevronsRight size={18} /> : <ChevronsLeft size={18} />}<span className="nav-label">Collapse</span></button>
-    </aside>
+    </aside></div>
     <div className="scrim" onClick={close} aria-hidden="true" />
     <div className="main">
       <header className="topbar">
@@ -113,7 +114,7 @@ export function AppShell({ mode, headerExtra, ribbon, banners }: { mode: 'monito
       {ribbon}
       <main className="content">
         {banners ? <div className="banner-stack">{banners}</div> : null}
-        <Outlet />
+        <ErrorBoundary resetKey={location.pathname}><Outlet /></ErrorBoundary>
       </main>
     </div>
   </div>;

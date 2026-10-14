@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { EmptyState } from './components/ui';
 import { ToastProvider } from './components/ui/Toasts';
+import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { AdminLayout } from './layouts/AdminLayout';
 import { MonitorLayout } from './layouts/MonitorLayout';
 import { AdminOverviewPage } from './pages/admin/AdminOverviewPage';
@@ -25,7 +26,7 @@ function NotFound() {
 }
 
 export default function App() {
-  return <ToastProvider>
+  return <ErrorBoundary><ToastProvider>
     <StatusProvider>
       <BrowserRouter>
         <Routes>
@@ -47,5 +48,5 @@ export default function App() {
         </Routes>
       </BrowserRouter>
     </StatusProvider>
-  </ToastProvider>;
+  </ToastProvider></ErrorBoundary>;
 }

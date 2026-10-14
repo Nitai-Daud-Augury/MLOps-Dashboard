@@ -23,7 +23,7 @@ export function MachineFacts({ machine }: { machine: MachineStatus }) {
     <dt>First missing</dt><dd className="mono">{machine.first_missing_month ?? '—'}</dd>
     <dt>Last populated</dt><dd className="mono">{machine.last_populated_month ?? '—'}</dd>
     <dt>Installed</dt><dd>{machine.installation_at ? exactTime(machine.installation_at) : '—'}</dd>
-    <dt>Rows</dt><dd className="mono">{machine.production_rows.toLocaleString('en-GB')}{machine.silver_rows !== undefined ? ` (silver ${machine.silver_rows.toLocaleString('en-GB')})` : ''}</dd>
+    <dt>Rows</dt><dd className="mono">{(machine.production_rows ?? 0).toLocaleString('en-GB')}{typeof machine.silver_rows === 'number' ? ` (silver ${machine.silver_rows.toLocaleString('en-GB')})` : ''}</dd>
     <dt>Lifecycle</dt><dd>{machine.lifecycle_source ? `${machine.lifecycle_source}${machine.lifecycle_enriched ? '' : ' (no record)'}` : 'none'}</dd>
     {machine.crosscheck ? <><dt>Cross-check</dt><dd>{machine.crosscheck.status} · {machine.crosscheck.flagged_months} flagged month(s)</dd></> : null}
     <dt>Recommended</dt><dd className="wrap">{machine.recommended_action || '—'}</dd>

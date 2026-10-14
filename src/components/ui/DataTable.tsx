@@ -1,11 +1,14 @@
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ChevronUp } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ChevronUp, Search } from 'lucide-react';
 import { useMemo, type ReactNode } from 'react';
 import { SkeletonRows } from './index';
+import { InfoTip } from './Layout';
 import { PAGE_SIZES, useTableState } from './tableState';
 
 export interface Column<T> {
   key: string;
   header: ReactNode;
+  /** Short tooltip that explains the column (shown as an info icon). */
+  help?: string;
   cell: (row: T) => ReactNode;
   sort?: (a: T, b: T) => number;
   className?: string;
@@ -51,8 +54,9 @@ export function DataTable<T>({ rows, columns, rowKey, prefix = '', defaultSize =
       <table className={compact ? 'compact' : undefined} aria-label={label}>
         <thead><tr>{columns.map((c) => <th key={c.key} scope="col" className={`${c.sticky ? 'sticky-col ' : ''}${c.optional ? 'hide-sm ' : ''}${c.className ?? ''}`}
           aria-sort={c.sort ? (state.sort === c.key ? (state.dir === 1 ? 'ascending' : 'descending') : 'none') : undefined}>
-          {c.sort ? <button type="button" onClick={() => state.toggleSort(c.key)}>{c.header}
-            {state.sort === c.key ? (state.dir === 1 ? <ChevronUp size={13} /> : <ChevronDown size={13} />) : null}</button> : c.header}</th>)}</tr></thead>
+          <span className="th-inner">{c.sort ? <button type="button" onClick={() => state.toggleSort(c.key)}>{c.header}
+            {state.sort === c.key ? (state.dir === 1 ? <ChevronUp size={13} /> : <ChevronDown size={13} />) : null}</button> : c.header}
+            {c.help ? <InfoTip text={c.help} /> : null}</span></th>)}</tr></thead>
         <tbody>
           {loading && !rows.length ? <SkeletonRows columns={columns.length} rows={Math.min(state.size, 8)} /> : visible.map((row) => <tr key={rowKey(row)}
             className={[onRowClick ? 'clickable' : '', rowClassName?.(row) ?? ''].join(' ').trim() || undefined}
@@ -78,5 +82,21 @@ export function DataTable<T>({ rows, columns, rowKey, prefix = '', defaultSize =
         <button type="button" aria-label="Last page" disabled={page >= pages} onClick={() => state.setPage(pages)}><ChevronsRight size={14} /></button>
       </nav> : null}
     </div> : null}
+  </div>;
+}
+
+/** Shared table search box. */
+export function TableSearch({ value, onChange, placeholder = 'Search…', label }: { value: string; onChange: (value: string) => void; placeholder?: string; label: string }) {
+  return <label className="search"><Search size={15} aria-hidden="true" /><input type="search" placeholder={placeholder} aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} /></label>;
+}
+
+export interface FilterOption { value: string; label: string; count?: number }
+
+/** Shared filter chips: "All" plus one toggle per option (multi-select), with counts. */
+export function FilterChips({ options, selected, onChange, label }: { options: FilterOption[]; selected: string[]; onChange: (next: string[]) => void; label: string }) {
+  return <div className="seg-group" role="group" aria-label={label}>
+    <button type="button" className={`seg${selected.length ? '' : ' seg-on'}`} aria-pressed={!selected.length} onClick={() => onChange([])}>All</button>
+    {options.map((o) => { const on = selected.includes(o.value); return <button key={o.value} type="button" className={`seg${on ? ' seg-on' : ''}`} aria-pressed={on}
+      onClick={() => onChange(on ? selected.filter((v) => v !== o.value) : [...selected, o.value])}>{o.label}{o.count !== undefined ? <span className="muted num">{o.count}</span> : null}</button>; })}
   </div>;
 }

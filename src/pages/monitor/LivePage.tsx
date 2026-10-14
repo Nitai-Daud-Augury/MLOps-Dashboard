@@ -4,7 +4,7 @@ import { Banner, ErrorState, RefreshButton, Timestamp } from '../../components/u
 import { KpiCard, PageHeader, Section, type KpiState } from '../../components/ui/Layout';
 import { useToast } from '../../components/ui/toastContext';
 import { useWorkflowSummary } from '../../features/workflows/useWorkflowSummary';
-import { workflowSort } from '../../features/workflows/sort';
+import { nestChildren, workflowSort } from '../../features/workflows/sort';
 import { DONE, FAILED, finishedWithin } from '../../features/workflows/windowed';
 import { EmptyWorkflows, WorkflowTable } from '../../features/workflows/WorkflowTable';
 import { isFinishedWorkflow } from '../../lib/status';
@@ -22,8 +22,8 @@ export function LivePage() {
   const all = (data?.workflows ?? []).slice().sort(workflowSort);
   const lists: Record<View, typeof all> = {
     active: all.filter((w) => w.pending || !isFinishedWorkflow(w.status)),
-    failed: all.filter((w) => FAILED.includes(w.status.toLowerCase())),
-    done: all.filter((w) => DONE.includes(w.status.toLowerCase())),
+    failed: all.filter((w) => FAILED.includes((w.status ?? '').toLowerCase())),
+    done: all.filter((w) => DONE.includes((w.status ?? '').toLowerCase())),
   };
   const failed24 = finishedWithin(all, FAILED).length;
   const done24 = finishedWithin(all, DONE).length;
@@ -55,7 +55,7 @@ export function LivePage() {
     <Section title="Workflows" description="Pending rows are dispatches the dashboard sent that the status source has not reported yet. Switch lists with the tabs or the cards.">
       <div className="tabs" role="tablist">{(Object.keys(VIEWS) as View[]).map((key) => <button key={key} type="button" role="tab" className="tab" aria-selected={view === key}
         onClick={() => show(key)}>{VIEWS[key]} <span className="muted num">{lists[key].length}</span></button>)}</div>
-      <WorkflowTable workflows={lists[view]} loading={summary.loading} empty={<EmptyWorkflows message={view === 'active' ? 'Nothing is running or pending. New dashboard dispatches show up here immediately as pending rows.' : 'No workflows in this list in the last status snapshot.'} />} />
+      <WorkflowTable workflows={nestChildren(lists[view])} loading={summary.loading} empty={<EmptyWorkflows message={view === 'active' ? 'Nothing is running or pending. New dashboard dispatches show up here immediately as pending rows.' : 'No workflows in this list in the last status snapshot.'} />} />
     </Section>
   </>;
 }

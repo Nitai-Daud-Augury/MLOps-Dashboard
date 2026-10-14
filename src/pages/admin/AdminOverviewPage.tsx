@@ -1,5 +1,8 @@
-import { CalendarClock, ListChecks, Plus, Send, XCircle } from 'lucide-react';
+import { CalendarClock, ExternalLink, ListChecks, Plus, Send, XCircle } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { QuickView } from '../../components/ui/QuickView';
+import { actionError, actionMachines, shortRunId } from '../../features/backfill/actionRecord';
 import { Banner, EmptyState, ErrorState, RefreshButton, StatusBadge, Timestamp } from '../../components/ui';
 import { DataTable, type Column } from '../../components/ui/DataTable';
 import { KpiCard, PageHeader, Section } from '../../components/ui/Layout';
@@ -24,14 +27,29 @@ function Check({ name, what, check, loading }: { name: string; what: string; che
   </div></li>;
 }
 
-const ACTION_COLUMNS: Column<AdminAction>[] = [
-  { key: 'created', header: 'Created', cell: (a) => <Timestamp value={a.created_at} />, sort: (a, b) => a.created_at.localeCompare(b.created_at) },
-  { key: 'action', header: 'Action', cell: (a) => <>{a.action}{a.flow_name ? <span className="muted"> · {a.flow_name}</span> : null}</> },
-  { key: 'status', header: 'Status', cell: (a) => { const t = workflowTone(a.phase && a.phase !== 'accepted' ? a.phase : a.status); return <StatusBadge tone={t.tone} label={a.phase ? phaseLabel(a.phase) : t.label} />; } },
-  { key: 'machines', header: 'Machines', optional: true, cell: (a) => <span className="mono" title={(a.machine_ids ?? []).join(', ')}>{a.machine_ids?.length ? (a.machine_ids.length === 1 ? a.machine_ids[0] : `${a.machine_ids.length} machines`) : '—'}</span> },
-  { key: 'workflow', header: 'Workflow', cell: (a) => <span className="mono">{a.outerbounds_url ? <a href={a.outerbounds_url} target="_blank" rel="noreferrer">{a.workflow_id ?? 'open'}</a> : a.workflow_id ?? '—'}</span> },
-  { key: 'error', header: 'Error', optional: true, cell: (a) => <span className="wrap muted">{a.error ?? ''}</span> },
-];
+const machineHref = (id: string) => `/monitor/machines/${encodeURIComponent(id)}`;
+
+/** One-line error; full text on hover, click to expand/collapse. */
+function ErrorCell({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  if (!text) return null;
+  return <button type="button" className={`error-cell${open ? ' open' : ''}`} title={open ? 'Click to collapse' : text} aria-expanded={open} onClick={() => setOpen(!open)}>{text}</button>;
+}
+
+function actionColumns(onQuickView: (a: AdminAction) => void): Column<AdminAction>[] {
+  return [
+    { key: 'created', header: 'Created', cell: (a) => <Timestamp value={a.created_at} />, sort: (a, b) => a.created_at.localeCompare(b.created_at) },
+    { key: 'action', header: 'Action', cell: (a) => a.action },
+    { key: 'status', header: 'Status', cell: (a) => { const t = workflowTone(a.phase && a.phase !== 'accepted' ? a.phase : a.status); return <StatusBadge tone={t.tone} label={a.phase ? phaseLabel(a.phase) : t.label} />; } },
+    { key: 'machine', header: 'Machine', help: 'Opens the machine page. Quick view shows the run details here.', cell: (a) => { const ids = actionMachines(a); return <span className="machine-cell">
+      {ids.length === 1 ? <Link className="mono" to={machineHref(ids[0])}>{ids[0]}</Link> : ids.length ? <span className="mono" title={ids.join(', ')}>{ids.length} machines</span> : <span className="muted">—</span>}
+      <button type="button" className="btn btn-sm btn-ghost" onClick={() => onQuickView(a)}>Quick view</button></span>; } },
+    { key: 'workflow', header: 'Run', help: 'Opens the run in Outerbounds.', cell: (a) => a.outerbounds_url
+      ? <a className="mono" href={a.outerbounds_url} target="_blank" rel="noreferrer" title={a.workflow_id ?? a.flow_name ?? ''}>{shortRunId(a.workflow_id) || 'All runs'}</a>
+      : <span className="mono muted">{shortRunId(a.workflow_id) || '—'}</span> },
+    { key: 'error', header: 'Error', optional: true, cell: (a) => <ErrorCell text={actionError(a)} /> },
+  ];
+}
 
 export function AdminOverviewPage() {
   const { runtime } = useStatus();
@@ -39,6 +57,9 @@ export function AdminOverviewPage() {
   const actions = useResource<{ actions: AdminAction[] }>('/api/admin/actions', { cacheKey: 'admin-actions', maxAgeMs: 60_000 });
   const summary = useWorkflowSummary({ live: false });
   const list = actions.data?.actions ?? [];
+  const [viewing, setViewing] = useState<AdminAction | null>(null);
+  const columns = useMemo(() => actionColumns(setViewing), []);
+  const viewIds = viewing ? actionMachines(viewing) : [];
   const today = ilDay(Date.now());
   const todayCount = list.filter((a) => ilDay(a.created_at) === today).length;
   const failed24 = list.filter((a) => isFailed(a) && Date.now() - Date.parse(a.finished_at ?? a.created_at) <= 24 * 3600_000).length;
@@ -71,9 +92,22 @@ export function AdminOverviewPage() {
     <Section flush title="Recent actions" description="Every trigger, stop and probe sent from this dashboard, newest first."
       actions={<RefreshButton onClick={() => void actions.reload()} fetching={actions.refreshing} />}>
       {actions.error && !actions.data ? <ErrorState message={actions.error} onRetry={() => void actions.reload()} />
-        : <DataTable label="Recent actions" prefix="a" defaultSize={10} rows={list} columns={ACTION_COLUMNS} rowKey={(a) => a.id} loading={actions.loading}
+        : <DataTable label="Recent actions" prefix="a" defaultSize={10} rows={list} columns={columns} rowKey={(a) => a.id} loading={actions.loading}
           rowClassName={(a) => (isFailed(a) ? 'failed' : undefined)}
           empty={<EmptyState title="No admin actions yet" action={<Link className="btn" to="/admin/backfill">Start a backfill</Link>}>Triggers, stops and probes are recorded here.</EmptyState>} />}
     </Section>
+    <QuickView open={Boolean(viewing)} onClose={() => setViewing(null)} title={viewing?.flow_name ?? viewing?.action ?? ''} subtitle={viewing ? `${viewing.action} · ${viewing.status}` : ''}
+      fields={viewing ? [
+        { label: viewIds.length > 1 ? 'Machines' : 'Machine', value: viewIds.length ? <span className="mono">{viewIds.map((id, i) => <span key={id}>{i ? ', ' : ''}<Link to={machineHref(id)}>{id}</Link></span>)}</span> : '—' },
+        { label: 'Run', value: <span className="mono">{viewing.workflow_id ?? '—'}</span> },
+        { label: 'Created', value: <Timestamp value={viewing.created_at} /> },
+        { label: 'Finished', value: viewing.finished_at ? <Timestamp value={viewing.finished_at} /> : '—' },
+        ...(viewing.split?.mode ? [{ label: 'Split', value: `${viewing.split.mode}${viewing.split.days ? ` · ${viewing.split.days} days` : ''}` }] : []),
+        ...(actionError(viewing) ? [{ label: 'Error', value: <span className="field-error">{actionError(viewing)}</span> }] : []),
+      ] : []}
+      actions={viewing ? <>
+        {viewIds.length === 1 ? <Link className="btn" to={machineHref(viewIds[0])}>Machine page</Link> : null}
+        {viewing.outerbounds_url ? <a className="btn btn-primary" href={viewing.outerbounds_url} target="_blank" rel="noreferrer">Open run <ExternalLink size={14} /></a> : null}
+      </> : null} />
   </>;
 }

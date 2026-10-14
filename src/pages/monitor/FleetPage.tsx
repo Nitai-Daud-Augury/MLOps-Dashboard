@@ -1,12 +1,14 @@
-import { AlertOctagon, CheckCircle2, CircleSlash, Download, ExternalLink, Play, RotateCcw, Rows3, Search, Server, TriangleAlert, X } from 'lucide-react';
+import { AlertOctagon, CheckCircle2, CircleSlash, Download, Play, RotateCcw, Search, Server, TriangleAlert, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { API_BASE, STATUS_OPTIONS } from '../../constants';
 import { EmptyState, ErrorState, RefreshButton, Spinner, Timestamp } from '../../components/ui';
-import { DataTable, type Column } from '../../components/ui/DataTable';
+import { DataTable, FilterChips, TableSearch, type Column } from '../../components/ui/DataTable';
 import { KpiCard, Meter, PageHeader, Section, type KpiState } from '../../components/ui/Layout';
 import { MachineFacts, MachineStatusBadge, MachineTitle } from '../../features/machines/MachineSummary';
 import { MonthGrid } from '../../features/machines/MonthGrid';
+import { ScanNotes } from '../../features/scan/ScanNotes';
+import { FeaturesSourceControl } from '../../components/features-source/FeaturesSourceControl';
 import { duration, exactTime } from '../../lib/format';
 import { BACKFILL_STATUS } from '../../lib/status';
 import { useStatus } from '../../state/statusStore';
@@ -36,17 +38,21 @@ function ScanProgress({ payload }: { payload: StatusPayload }) {
 }
 
 const coverage = (m: MachineStatus) => m.months_complete / (m.months_expected || 1);
+const CROSSCHECK: Record<string, string> = { match: 'Matches', mismatch: 'Differs', feature_store_stale: 'Outdated', error: 'Check failed' };
 const COLUMNS: Column<MachineStatus>[] = [
   { key: 'machine', header: 'Machine', sticky: true, cell: (m) => <div className="cell-stack"><MachineTitle machine={m} />{m.display_name && m.display_name !== m.machine_id ? <span className="mono">{m.machine_id}</span> : null}</div>,
     sort: (a, b) => (a.display_name || a.machine_id).localeCompare(b.display_name || b.machine_id) },
-  { key: 'status', header: 'Status', cell: (m) => <MachineStatusBadge machine={m} />, sort: (a, b) => a.status.localeCompare(b.status) },
-  { key: 'coverage', header: 'Coverage', cell: (m) => <Meter done={m.months_complete} total={m.months_expected} />, sort: (a, b) => coverage(a) - coverage(b) },
-  { key: 'first_missing', header: 'First missing', optional: true, cell: (m) => <span className="mono">{m.first_missing_month ?? '—'}</span>,
-    sort: (a, b) => (a.first_missing_month ?? '9999').localeCompare(b.first_missing_month ?? '9999') },
-  { key: 'last_populated', header: 'Last populated', optional: true, cell: (m) => <span className="mono">{m.last_populated_month ?? '—'}</span>,
-    sort: (a, b) => (a.last_populated_month ?? '').localeCompare(b.last_populated_month ?? '') },
-  { key: 'check', header: 'Cross-check', optional: true, cell: (m) => <span className="muted">{m.crosscheck?.status === 'mismatch' ? '⚠ mismatch' : m.crosscheck?.status === 'match' ? '✓ match' : '—'}</span> },
-  { key: 'open', header: <span className="sr-only">Open</span>, cell: (m) => <Link className="icon-btn" to={`/monitor/machines/${encodeURIComponent(m.machine_id)}`} aria-label={`Open ${m.machine_id}`} title="Open machine page" onClick={(e) => e.stopPropagation()}><ExternalLink size={14} /></Link> },
+  { key: 'status', header: 'Status', cell: (m) => <MachineStatusBadge machine={m} />, sort: (a, b) => (a.status ?? '').localeCompare(b.status ?? '') },
+  { key: 'coverage', header: 'Months with data', help: 'Online months that have features, out of all online months since install.',
+    cell: (m) => <Meter done={m.months_complete} total={m.months_expected} />, sort: (a, b) => coverage(a) - coverage(b) },
+  { key: 'first_missing', header: 'First gap', optional: true, help: 'Earliest online month with no features. — means none missing.',
+    cell: (m) => <span className="mono">{m.first_missing_month ?? '—'}</span>, sort: (a, b) => (a.first_missing_month ?? '9999').localeCompare(b.first_missing_month ?? '9999') },
+  { key: 'last_populated', header: 'Latest data', optional: true, help: 'Most recent month that has features.',
+    cell: (m) => <span className="mono">{m.last_populated_month ?? '—'}</span>, sort: (a, b) => (a.last_populated_month ?? '').localeCompare(b.last_populated_month ?? '') },
+  { key: 'check', header: 'Databricks copy', optional: true, help: 'Optional check: do the Databricks feature tables match the blob files? Outdated = Databricks has an older copy. Does not change Status.',
+    cell: (m) => { const c = m.crosscheck; if (!c) return <span className="muted">—</span>;
+      const label = CROSSCHECK[c.status] ?? c.status; const n = c.status === 'mismatch' ? c.flagged_months : c.status === 'feature_store_stale' ? c.stale_months : undefined;
+      return <span className={c.status === 'match' ? 'muted' : ''}>{c.status === 'match' ? '✓ ' : '⚠ '}{label}{n ? ` · ${n} mo` : ''}</span>; } },
 ];
 
 export function FleetPage() {
@@ -57,8 +63,6 @@ export function FleetPage() {
   const hideTest = params.get('hide_test') === '1';
   const quick = params.get('quick');
   const [search, setSearch] = useState(query);
-  const [compact, setCompact] = useState(() => localStorage.getItem('ulrpm-density') === 'compact');
-  useEffect(() => { localStorage.setItem('ulrpm-density', compact ? 'compact' : 'comfortable'); }, [compact]);
   const update = (changes: Record<string, string | null>) => setParams((current) => {
     const next = new URLSearchParams(current);
     for (const [key, value] of Object.entries(changes)) { if (value === null || value === '') next.delete(key); else next.set(key, value); }
@@ -84,7 +88,7 @@ export function FleetPage() {
   };
   const quickMachine = quick ? machines?.find((m) => m.machine_id === quick) : undefined;
   const filtersOn = Boolean(query || statuses.length || hideTest);
-  const total = machines?.length ?? 0;
+  const testCount = (machines ?? []).filter((m) => m.is_test_machine).length;
   const pct = (n: number) => (pool.length ? `${Math.round((n / pool.length) * 100)}% of fleet` : '—');
 
   if (!payload && error) return <ErrorState message={error} onRetry={() => void reload()} />;
@@ -99,38 +103,36 @@ export function FleetPage() {
         {running ? <button type="button" className="btn" onClick={() => void resetScan()} title="Clear a stuck scan state"><RotateCcw size={14} />Reset scan</button> : null}
       </>} />
     {payload && running ? <ScanProgress payload={payload} /> : null}
-    {payload && payload.snapshot.warnings?.length ? <details className="card section"><summary>{payload.snapshot.warnings.length} scan warning(s)</summary>
-      <ul>{payload.snapshot.warnings.map((warning) => <li key={warning} className="wrap">{warning}</li>)}</ul></details> : null}
-    <div className="kpis" aria-label="Machine counts">
+    <div className="source-bar"><FeaturesSourceControl placement="inline" canSwitch /></div>
+    <ScanNotes warnings={payload?.snapshot.warnings} />
+    <div className="kpis five" aria-label="Machine counts">
       <KpiCard icon={<Server size={20} />} tone="primary" label="Machines" value={pool.length} state={kpiState} active={!statuses.length && filtersOn}
-        helper={hideTest ? `${total - pool.length} test machines hidden` : `${pool.filter((m) => m.is_test_machine).length} test machines included`}
-        tooltip="All machines in the last scan (respects the Hide test toggle)." onClick={() => update({ status: null })} />
+        helper={hideTest ? `${testCount} test machines hidden` : `Includes ${testCount} test machines`}
+        tooltip="Machines in the last scan." onClick={() => update({ status: null })} />
       <KpiCard icon={<CheckCircle2 size={20} />} tone="ok" label="Complete" value={count('backfilled')} helper={pct(count('backfilled'))} state={kpiState}
-        tooltip="Status backfilled: every expected month has features." active={statuses.length === 1 && statuses[0] === 'backfilled'} onClick={() => toggleStatus('backfilled', true)} />
+        tooltip="Every online month has features." active={statuses.length === 1 && statuses[0] === 'backfilled'} onClick={() => toggleStatus('backfilled', true)} />
       <KpiCard icon={<TriangleAlert size={20} />} tone="warn" label="Needs backfill" value={count('needs_backfill')} helper="Missing one or more months" state={kpiState}
-        tooltip="Status needs_backfill: at least one expected month is missing. Start a backfill from Admin." active={statuses.length === 1 && statuses[0] === 'needs_backfill'} onClick={() => toggleStatus('needs_backfill', true)} />
+        tooltip="At least one online month has no features. Fix it from Admin → Backfill." active={statuses.length === 1 && statuses[0] === 'needs_backfill'} onClick={() => toggleStatus('needs_backfill', true)} />
       <KpiCard icon={<CircleSlash size={20} />} tone="neutral" label="No source data" value={count('no_source_data')} helper="Nothing to backfill from" state={kpiState}
-        tooltip="Status no_source_data: the raw source has no data for this machine." active={statuses.length === 1 && statuses[0] === 'no_source_data'} onClick={() => toggleStatus('no_source_data', true)} />
+        tooltip="The raw source has no data to build features from." active={statuses.length === 1 && statuses[0] === 'no_source_data'} onClick={() => toggleStatus('no_source_data', true)} />
       <KpiCard icon={<AlertOctagon size={20} />} tone={count('scan_error') ? 'danger' : 'neutral'} label="Scan errors" value={count('scan_error')} helper={count('scan_error') ? 'Rescan or check the reason' : 'None'} state={kpiState}
-        tooltip="Status scan_error: the scan could not read this machine." active={statuses.length === 1 && statuses[0] === 'scan_error'} onClick={() => toggleStatus('scan_error', true)} />
+        tooltip="The last scan could not read this machine." active={statuses.length === 1 && statuses[0] === 'scan_error'} onClick={() => toggleStatus('scan_error', true)} />
     </div>
-    <Section flush title="Machines" description="Every machine in the last scan with its month coverage. Click a row for a quick view; filter with the cards above or the controls below."
-      actions={<a className="btn" href={`${API_BASE}/api/backfill/export/manifest?status=needs_backfill`} title="Download the needs_backfill machine list as a manifest"><Download size={14} />Export needs backfill</a>}>
-      <DataTable label="Machines" rows={filtered} total={pool.length} columns={COLUMNS} rowKey={(m) => m.machine_id} defaultSort="status" compact={compact}
+    <Section flush title="Machines" description="Click a row for details."
+      actions={<a className="btn" href={`${API_BASE}/api/backfill/export/manifest?status=needs_backfill`}
+        title="CSV with one row per missing month (machine_id, since, until), for all machines in the last scan. Table filters are not applied."><Download size={14} />Missing months (CSV)</a>}>
+      <DataTable label="Machines" rows={filtered} total={pool.length} columns={COLUMNS} rowKey={(m) => m.machine_id} defaultSort="status"
         loading={loading || (running && !machines?.length)}
         overlay={running && machines?.length ? <div className="scan-overlay"><Spinner /> A scan is running; these rows are from the previous scan.</div> : null}
         onRowClick={(m) => update({ quick: m.machine_id })}
         toolbar={<>
-          <label className="search"><Search size={15} aria-hidden="true" /><input type="search" placeholder="Search ID or name…" aria-label="Search machines" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
-          <div className="seg-group" role="group" aria-label="Status filter">
-            {STATUS_OPTIONS.filter((s) => s !== 'all').map((s) => <button key={s} type="button" className={`seg${statuses.includes(s as BackfillStatus) ? ' seg-on' : ''}`}
-              aria-pressed={statuses.includes(s as BackfillStatus)} onClick={() => toggleStatus(s as BackfillStatus)}>
-              {BACKFILL_STATUS[s as BackfillStatus].label} <span className="muted num">{count(s as BackfillStatus)}</span></button>)}
-          </div>
-          <label className="check"><input type="checkbox" checked={hideTest} onChange={(e) => update({ hide_test: e.target.checked ? '1' : null })} />Hide test</label>
+          <TableSearch label="Search machines" placeholder="Search name or ID" value={search} onChange={setSearch} />
+          <FilterChips label="Status" selected={statuses} onChange={(next) => update({ status: next.join(',') || null })}
+            options={STATUS_OPTIONS.filter((s) => s !== 'all' && count(s as BackfillStatus) > 0).map((s) => ({ value: s, label: BACKFILL_STATUS[s as BackfillStatus].label, count: count(s as BackfillStatus) }))} />
+          <label className="switch" title="Test machines: name or tag contains test, e2e or qa, a known test company, or listed in test_machine_ids.txt">
+            <input type="checkbox" checked={hideTest} onChange={(e) => update({ hide_test: e.target.checked ? '1' : null })} />Hide test machines ({testCount})</label>
           <span className="grow" />
-          {filtersOn ? <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setSearch(''); setParams({}, { replace: true }); }}><X size={14} />Clear all</button> : null}
-          <button type="button" className="btn btn-sm" aria-pressed={compact} onClick={() => setCompact((v) => !v)} title="Toggle row density"><Rows3 size={14} />{compact ? 'Comfortable' : 'Compact'}</button>
+          {filtersOn ? <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setSearch(''); setParams({}, { replace: true }); }}><X size={14} />Clear filters</button> : null}
         </>}
         empty={!payload ? null : machines?.length
           ? <EmptyState icon={<Search size={20} />} title="No machines match" action={<button type="button" className="btn" onClick={() => { setSearch(''); setParams({}, { replace: true }); }}>Clear filters</button>}>Change the search or the status filter.</EmptyState>

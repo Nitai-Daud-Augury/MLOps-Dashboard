@@ -1,16 +1,21 @@
-import { Activity, Lock, Send, Square, XCircle } from 'lucide-react';
+import { Activity, AlertTriangle, Lock, Send, Square, XCircle } from 'lucide-react';
 import { useState } from 'react';
 import { DEFAULT_DEV_NAMESPACE } from '../../constants';
 import { Banner, ConfirmDialog, EmptyState, ErrorState, RefreshButton, Spinner, StatusBadge, Timestamp } from '../../components/ui';
 import { KpiCard, PageHeader, Section } from '../../components/ui/Layout';
 import { useToast } from '../../components/ui/toastContext';
+import { shortRunId } from '../../features/backfill/actionRecord';
 import { useWorkflowSummary } from '../../features/workflows/useWorkflowSummary';
-import { workflowSort } from '../../features/workflows/sort';
+import { nestChildren, workflowSort } from '../../features/workflows/sort';
 import { EmptyWorkflows, WorkflowTable } from '../../features/workflows/WorkflowTable';
 import { apiJson, errorText, postJson, useResource } from '../../lib/api';
 import { monthLabel } from '../../lib/format';
+import { Link } from 'react-router-dom';
 import { ACTIVE_MONTH_STATES, isFinishedWorkflow, workflowTone } from '../../lib/status';
 import type { ActiveMonth, AdminSpec, BusyMachineInfo, RunningWorkflow } from '../../types';
+
+/** Type-to-confirm text for cancelling one month: <machine_id>:<YYYY-MM>. */
+const cancelConfirmText = (machineId: string, m: { year: number; month: number }) => `${machineId}:${m.year}-${String(m.month).padStart(2, '0')}`;
 
 type Pending = { kind: 'terminate'; workflowId: string } | { kind: 'cancel'; machineId: string; month: ActiveMonth };
 
@@ -30,7 +35,7 @@ export function OperationsPage() {
   const all = (data?.workflows ?? []).slice().sort(workflowSort);
   const active = all.filter((w) => w.pending || !isFinishedWorkflow(w.status));
   const reviewed = new Set(data?.reviewed_workflow_ids ?? []);
-  const failed = all.filter((w) => ['failed', 'error'].includes(w.status.toLowerCase()));
+  const failed = all.filter((w) => ['failed', 'error', 'timed_out'].includes((w.status ?? '').toLowerCase()));
   const activeMonths = (months.data?.months ?? []).filter((m) => ACTIVE_MONTH_STATES.includes(m.state));
   const parent = activeMonths.find((m) => m.parent_workflow_id)?.parent_workflow_id;
   const namespace = spec.data?.default_dev_namespace ?? DEFAULT_DEV_NAMESPACE;
@@ -62,7 +67,7 @@ export function OperationsPage() {
 
   if (!data && summary.error) return <ErrorState message={summary.error} onRetry={() => void summary.reload()} />;
   return <>
-    <PageHeader title="Operations" purpose="Stop running workflows, cancel single months, and acknowledge failures."
+    <PageHeader title="Operations" purpose="Stop runs, review failures, cancel single months."
       meta={<><span>{data?.fetched_at ? <Timestamp value={data.fetched_at} prefix="Last fetched" /> : 'Status not fetched yet'}</span><span>snapshot v{data?.snapshot_version ?? '—'}</span></>}
       actions={<RefreshButton onClick={() => void summary.refresh()} fetching={summary.fetching} retryIn={summary.retryIn} />} />
     {summary.refreshError ? <Banner tone="error" title="Refresh failed">{summary.refreshError}</Banner> : null}
@@ -74,33 +79,35 @@ export function OperationsPage() {
       <KpiCard icon={<XCircle size={20} />} tone={failed.some((w) => !reviewed.has(w.workflow_id)) ? 'danger' : 'neutral'} label="Failed (unreviewed)" value={failed.filter((w) => !reviewed.has(w.workflow_id)).length} state={summary.loading ? 'loading' : 'ready'} helper="Need a look" />
     </div>
     <Section title="Running and pending" description="Everything not finished yet. Stop terminates the workflow (type its ID to confirm); pending rows can't be stopped until they are reported.">
-      <WorkflowTable prefix="run" defaultSize={10} workflows={active} loading={summary.loading} empty={<EmptyWorkflows message="Nothing is running or pending." />}
+      <WorkflowTable prefix="run" defaultSize={10} workflows={nestChildren(active)} loading={summary.loading} empty={<EmptyWorkflows message="Nothing is running or pending." />}
         actions={(w) => w.pending && w.workflow_id.startsWith('pending-') ? <span className="muted">dispatching</span>
           : <button type="button" className="btn btn-danger-outline" onClick={() => setPending({ kind: 'terminate', workflowId: w.workflow_id })}><Square size={12} />Stop</button>} />
-    </Section>
-    <Section title="Cancel a month" description="Stop one month of a running backfill; the parent skips it and continues with the next month."
-      actions={<RefreshButton onClick={() => void locks.reload()} fetching={locks.loading || locks.refreshing} label="Reload locks" />}>
-      {locks.loading ? <p className="muted"><Spinner /> Loading machine locks…</p> : Object.keys(locks.data?.busy_machines ?? {}).length === 0
-        ? <p className="muted">No machine has an active backfill.</p>
-        : <label className="field">Machine with an active backfill<select value={machineId} onChange={(e) => setMachineId(e.target.value)}>
-          <option value="">Choose…</option>{Object.entries(locks.data?.busy_machines ?? {}).map(([id, info]) => <option key={id} value={id}>{id} · {info.source === 'argo_running' ? info.workflow_id ?? 'running' : 'control store'}</option>)}</select></label>}
-      {machineId ? months.loading ? <p className="muted"><Spinner /> Loading months…</p> : months.error ? <ErrorState message={months.error} onRetry={() => void months.reload()} />
-        : activeMonths.length ? <>
-          <ul className="stage-list">{activeMonths.map((m) => { const t = workflowTone(m.state); return <li key={m.month_index}><strong className="mono">{monthLabel(m.year, m.month)}</strong>
-            <div className="toolbar"><StatusBadge tone={t.tone} label={t.label} /><span className="mono muted">{m.child_workflow_id ?? ''}</span>
-              <button type="button" className="btn btn-danger-outline" disabled={!['queued', 'running'].includes(m.state)} onClick={() => setPending({ kind: 'cancel', machineId, month: m })}>Cancel month</button></div></li>; })}</ul>
-          {parent ? <button type="button" className="btn btn-danger" onClick={() => setPending({ kind: 'terminate', workflowId: parent })}><Square size={12} />Stop entire backfill ({parent})</button> : null}
-        </> : <p className="muted">No active months for {machineId}.</p> : null}
     </Section>
     <Section title="Failures to review" description="Failed workflows from the last status snapshot. Mark them reviewed once handled so the count above drops.">
       <WorkflowTable prefix="fail" defaultSize={10} workflows={failed} empty={<EmptyState title="No failed workflows">in the last status snapshot.</EmptyState>}
         actions={(w) => <button type="button" className="btn" disabled={reviewBusy === w.workflow_id} onClick={() => void toggleReview(w, !reviewed.has(w.workflow_id))}>
           {reviewBusy === w.workflow_id ? <Spinner /> : null}{reviewed.has(w.workflow_id) ? 'Reviewed ✓ (undo)' : 'Mark reviewed'}</button>} />
     </Section>
+    <section className="panel danger-zone" aria-labelledby="danger-h">
+      <div className="panel-head"><div><h2 id="danger-h"><AlertTriangle size={16} aria-hidden="true" /> Danger zone</h2>
+        <p className="helper">Cancel one month of a running backfill; the parent skips it and continues. Each action asks you to type its name.</p></div>
+        <RefreshButton onClick={() => void locks.reload()} fetching={locks.loading || locks.refreshing} label="Reload locks" /></div>
+      {locks.loading ? <p className="muted"><Spinner /> Loading machine locks…</p> : Object.keys(locks.data?.busy_machines ?? {}).length === 0
+        ? <p className="muted">No machine has an active backfill.</p>
+        : <label className="field">Machine with an active backfill<select value={machineId} onChange={(e) => setMachineId(e.target.value)}>
+          <option value="">Choose…</option>{Object.entries(locks.data?.busy_machines ?? {}).map(([id, info]) => <option key={id} value={id}>{id} · {info.source === 'argo_running' ? shortRunId(info.workflow_id) || 'running' : 'control store'}</option>)}</select></label>}
+      {machineId ? months.loading ? <p className="muted"><Spinner /> Loading months…</p> : months.error ? <ErrorState message={months.error} onRetry={() => void months.reload()} />
+        : activeMonths.length ? <>
+          <ul className="stage-list">{activeMonths.map((m) => { const t = workflowTone(m.state); return <li key={m.month_index}><strong className="mono">{monthLabel(m.year, m.month)}</strong>
+            <div className="toolbar"><StatusBadge tone={t.tone} label={t.label} /><span className="mono muted" title={m.child_workflow_id ?? ''}>{shortRunId(m.child_workflow_id)}</span>
+              <button type="button" className="btn btn-danger-outline" disabled={!['queued', 'running'].includes(m.state)} onClick={() => setPending({ kind: 'cancel', machineId, month: m })}>Cancel month</button></div></li>; })}</ul>
+          {parent ? <button type="button" className="btn btn-danger" onClick={() => setPending({ kind: 'terminate', workflowId: parent })}><Square size={12} />Stop entire backfill ({shortRunId(parent)})</button> : null}
+        </> : <p className="muted">No active months for <Link className="mono" to={`/monitor/machines/${encodeURIComponent(machineId)}`}>{machineId}</Link>.</p> : null}
+    </section>
     <ConfirmDialog open={Boolean(pending)} danger busy={busy} error={actionError}
       title={pending?.kind === 'terminate' ? 'Stop workflow?' : 'Cancel this month?'}
       confirmLabel={pending?.kind === 'terminate' ? 'Stop workflow' : 'Cancel month'}
-      confirmText={pending?.kind === 'terminate' ? pending.workflowId : undefined}
+      confirmText={pending?.kind === 'terminate' ? pending.workflowId : pending ? cancelConfirmText(pending.machineId, pending.month) : undefined}
       onConfirm={() => void run()} onCancel={() => { setPending(null); setActionError(null); }}>
       {pending?.kind === 'terminate' ? <p>This terminates <code>{pending.workflowId}</code> in namespace {namespace}. Remaining months of a parent backfill stop too.</p>
         : pending ? <p>Stops {monthLabel(pending.month.year, pending.month.month)} for <code>{pending.machineId}</code>. The parent skips it and continues with the next scheduled month, or finishes cleanly.</p> : null}

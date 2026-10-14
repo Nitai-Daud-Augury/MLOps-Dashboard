@@ -118,6 +118,12 @@ def register_static_spa_host(
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         if candidate is not None:
             return FileResponse(candidate)
+        # A missing file (anything with an extension, or a nested .../assets/...
+        # request from a relative base) must not get index.html: the browser
+        # would parse HTML as JS/CSS and the app would stay blank.
+        last = path.rsplit("/", 1)[-1]
+        if "." in last or "/assets/" in f"/{path}":
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
         return FileResponse(index_file)
 
     app.add_api_route("/", serve_root, methods=["GET", "HEAD"], include_in_schema=False)

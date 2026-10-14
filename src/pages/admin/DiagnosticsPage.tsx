@@ -2,12 +2,21 @@ import { Activity } from 'lucide-react';
 import { useState } from 'react';
 import { Banner, EmptyState, ErrorState, Spinner, StatusBadge, Timestamp } from '../../components/ui';
 import { type OuterboundsProbeStatus, type ProbeResult, type ProbeStageStatus } from '../../components/outerbounds-probe/probeApi';
+import { DataTable, type Column } from '../../components/ui/DataTable';
 import { PageHeader, Section } from '../../components/ui/Layout';
 import { ApiError, errorText, postJson, useResource } from '../../lib/api';
 import type { Tone } from '../../lib/status';
 
 const STAGE_TONE: Record<ProbeStageStatus, Tone> = { pass: 'success', fail: 'failed', skip: 'na', expected_fail: 'warn' };
 const STAGE_LABEL: Record<ProbeStageStatus, string> = { pass: 'pass', fail: 'fail', skip: 'skip', expected_fail: 'expected fail' };
+
+type Stage = ProbeResult['stages'][number];
+const STAGE_COLUMNS: Column<Stage>[] = [
+  { key: 'stage', header: 'Stage', cell: (st) => <strong>{st.name}</strong> },
+  { key: 'result', header: 'Result', cell: (st) => <StatusBadge tone={STAGE_TONE[st.status]} label={`${STAGE_LABEL[st.status]}${st.http_status ? ` · ${st.http_status}` : ''}`} /> },
+  { key: 'detail', header: 'Detail', cell: (st) => <div className="cell-stack wrap"><span>{st.detail}</span>{st.hint ? <span className="muted">Hint: {st.hint}</span> : null}</div> },
+  { key: 'time', header: 'Time', optional: true, cell: (st) => <span className="mono muted">{st.ms} ms{st.error_type ? ` · ${st.error_type}` : ''}</span>, sort: (a, b) => a.ms - b.ms },
+];
 
 /** Outerbounds connectivity probe (backend OUTERBOUNDS_PROBE_ENABLED; 404 = disabled). */
 export function DiagnosticsPage() {
@@ -38,11 +47,11 @@ export function DiagnosticsPage() {
   if (!probe) return <ErrorState message={status.error ?? 'Probe status unavailable'} onRetry={() => void status.reload()} />;
   const gha = probe.github_dispatch;
   return <>
-    <PageHeader title="Diagnostics" purpose="Checks that the dashboard can reach Outerbounds and GitHub Actions, without starting any work (unless you enable the trigger stage)."
+    <PageHeader title="Diagnostics" purpose="Can the dashboard reach Outerbounds and GitHub Actions? Read-only unless you enable the trigger stage."
       meta={<><span>Read-only checks against <span className="mono">{probe.domain}</span> (perimeter {probe.perimeter}). Credentials: {probe.credentials_source}. Dispatch backend: <span className="mono">{probe.dispatch_backend ?? 'none'}</span>.</span>
       {gha ? <span className="muted">GitHub Actions: <span className="mono">{gha.workflow}@{gha.ref}</span> in <span className="mono">{gha.repo}</span>, token {gha.token_configured ? 'configured' : 'not configured'}.</span> : null}</>} />
     {probe.python && !probe.python.ok ? <Banner tone="error" title="Child Python unavailable">{probe.python.error}</Banner> : null}
-    <Section title="Connectivity probe" description="Runs each stage in order (auth, list flows, list runs…) and reports pass / fail with a hint. Stages are time-capped.">
+    <Section title="Connectivity probe" description="Each stage runs in order and reports pass or fail with a hint.">
       <div className="form-row">
         <label className="field">Flow<select value={selectedFlow} onChange={(e) => setFlow(e.target.value)} disabled={running}>
           {probe.flow_allowlist.map((name) => <option key={name}>{name}</option>)}</select></label>
@@ -56,11 +65,8 @@ export function DiagnosticsPage() {
         <div className="toolbar"><StatusBadge tone={STAGE_TONE[shown.overall]} label={`overall ${STAGE_LABEL[shown.overall]}`} />
           <span className="muted">last run <Timestamp value={shown.finished_at} /> · {shown.ms} ms · {shown.flow}</span>
           {shown.counts ? <span className="mono muted">pass {shown.counts.pass} · fail {shown.counts.fail} · expected_fail {shown.counts.expected_fail} · skip {shown.counts.skip}</span> : null}</div>
-        <ul className="stage-list">{shown.stages.map((stage) => <li key={stage.id}>
-          <div><strong>{stage.name}</strong><div><StatusBadge tone={STAGE_TONE[stage.status]} label={`${STAGE_LABEL[stage.status]}${stage.http_status ? ` · ${stage.http_status}` : ''}`} /></div></div>
-          <div className="wrap"><span>{stage.detail}</span>{stage.description ? <p className="muted">{stage.description}</p> : null}
-            {stage.hint ? <p className="muted">Hint: {stage.hint}</p> : null}<span className="mono muted">{stage.ms} ms{stage.error_type ? ` · ${stage.error_type}` : ''}</span></div>
-        </li>)}</ul>
+        <div className="table-wrap"><DataTable label="Probe stages" prefix="probe" defaultSize={25} rows={shown.stages} columns={STAGE_COLUMNS} rowKey={(st) => st.id}
+          rowClassName={(st) => (st.status === 'fail' ? 'failed' : undefined)} /></div>
       </> : <EmptyState title="No probe has run yet">Nothing is triggered unless you enable the trigger stage.</EmptyState>}
     </Section>
   </>;

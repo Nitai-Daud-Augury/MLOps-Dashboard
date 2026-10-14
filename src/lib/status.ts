@@ -30,4 +30,6 @@ export function workflowTone(status?: string | null): { tone: Tone; label: strin
 }
 
 export const ACTIVE_MONTH_STATES = ['queued', 'running', 'cancel_requested', 'stopping', 'requeue_pending'];
-export const isFinishedWorkflow = (status: string) => ['succeeded', 'completed', 'failed', 'error'].includes(status.toLowerCase());
+/** Terminal run statuses: Argo phases (a terminated run ends Failed), Metaflow, GHA conclusions, dashboard action states. Mirrors backend month_locks.TERMINAL_PHASES. */
+export const TERMINAL_STATUSES = ['succeeded', 'completed', 'failed', 'error', 'terminated', 'cancelled', 'canceled', 'aborted', 'timed_out', 'skipped'];
+export const isFinishedWorkflow = (status?: string | null) => TERMINAL_STATUSES.includes((status ?? '').trim().toLowerCase());

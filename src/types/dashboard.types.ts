@@ -49,7 +49,15 @@ export interface ScanState {
 export interface StatusPayload {
   scan_state: ScanState;
   snapshot: DashboardSnapshot;
-  data_sources?: { features_source?: FeaturesSourceStatus; [key: string]: unknown };
+  data_sources?: {
+    features_source?: FeaturesSourceStatus;
+    inventory_source?: string;
+    lifecycle_table?: string | null;
+    features_crosscheck?: { table?: string | null; bronze_table?: string | null; [key: string]: unknown };
+    /** Non-secret locations for the Data source page links (backend data_sources._links_info). */
+    links?: import('../features/source/sourceLinks').SourceLinksConfig;
+    [key: string]: unknown;
+  };
   /** Durable scan snapshot (backend scan_snapshot_store): where it lives and whether it was restored. */
   persistence?: { store?: string; saved_at?: string | null; loaded_from?: string | null; saved_to?: string | null; loading?: boolean };
 }
