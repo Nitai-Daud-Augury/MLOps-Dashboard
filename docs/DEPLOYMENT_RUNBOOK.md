@@ -52,8 +52,12 @@ start a shared app until those owners approve the target workspace and costs.
    |---|---|
    | `DATABRICKS_HOST` | Workspace host URL for that environment. |
    | `DATABRICKS_CLIENT_ID` | Databricks service principal application/client ID. |
-   | `MONGODB_SECRET_SCOPE` | Existing Databricks secret scope name for that app/workspace. |
-   | `MONGODB_SECRET_KEY` | Secret key name containing the Mongo connection string. |
+   | `DASHBOARD_SECRET_SCOPE` | Existing Databricks secret scope holding all dashboard secrets (`mlops-dashboard`): Mongo URL, FST account key, GitHub dispatch token. |
+   | `MONGODB_SECRET_KEY` | Secret key name (in that scope) containing the Mongo connection string (`mongodb_url`). |
+
+   `DASHBOARD_SECRET_SCOPE` replaced `MONGODB_SECRET_SCOPE` (same value). The deploy workflow still
+   falls back to `MONGODB_SECRET_SCOPE` and logs a warning when it does; remove the legacy variable
+   once `DASHBOARD_SECRET_SCOPE` is set in both environments.
 
    These variables contain resource identifiers, not Mongo credentials. Never create a GitHub
    variable or workflow input for the Mongo URI itself.
@@ -411,12 +415,12 @@ mismatch -> 409, bad parameters -> 422, timeout -> 504, other Metaflow/Outerboun
    ```yaml
         - name: outerbounds_sp_auth_key
           secret:
-            scope: ${var.mongodb_secret_scope}
+            scope: ${var.dashboard_secret_scope}
             key: outerbounds_sp_auth_key
             permission: READ
         - name: outerbounds_sp_config_url
           secret:
-            scope: ${var.mongodb_secret_scope}
+            scope: ${var.dashboard_secret_scope}
             key: outerbounds_sp_config_url
             permission: READ
    ```
@@ -671,7 +675,7 @@ the repository does not set or switch profiles. Select a real, pre-created secre
 locally as bundle variables; these are identifiers only, not the URI:
 
 ```bash
-export BUNDLE_VAR_mongodb_secret_scope='<approved-secret-scope>'
+export BUNDLE_VAR_dashboard_secret_scope='<approved-secret-scope>'   # mlops-dashboard
 export BUNDLE_VAR_mongodb_secret_key='<approved-secret-key>'
 
 databricks bundle validate --target dev
@@ -801,7 +805,7 @@ not performed as part of this code change.
 |---|---|
 | App never reaches `RUNNING` / crashes | Inspect `databricks apps logs <app-name> --tail-lines 200`; confirm `app.yaml` command, root `package.json` build, Python deps, the Mongo resource key, and app port. Retry only after fixing the reported startup issue. |
 | OIDC fails in GitHub | Check exact `DATABRICKS_HOST` and service principal client ID environment variables, `id-token: write`, workflow Environment name, issuer/audience, repository/environment subject, and service principal workspace rights. No PAT fallback is configured. |
-| Bundle says variable missing | Confirm `MONGODB_SECRET_SCOPE` and `MONGODB_SECRET_KEY` are set on the selected GitHub Environment; local bundle operators need `BUNDLE_VAR_mongodb_secret_scope` and `BUNDLE_VAR_mongodb_secret_key`. Values are names, not Mongo credentials. |
+| Bundle says variable missing | Confirm `DASHBOARD_SECRET_SCOPE` (or, temporarily, the legacy `MONGODB_SECRET_SCOPE`) and `MONGODB_SECRET_KEY` are set on the selected GitHub Environment; local bundle operators need `BUNDLE_VAR_dashboard_secret_scope` and `BUNDLE_VAR_mongodb_secret_key` (or `--var dashboard_secret_scope=... --var mongodb_secret_key=...`). Values are names, not Mongo credentials. |
 | Lifecycle status is `unauthorized`, unavailable, or expired | Check the secret scope/key, resource binding, secret rotation/expiry, Mongo user grants, and app network path. Refresh/rotate Mongo auth only when status reports unauthorized/unavailable/expired, or when the deployed secret was rotated. Update the secret securely and restart/redeploy the app so its resource-backed environment is refreshed. A healthy status does not require refreshing Mongo auth. |
 | Mongo is not configured | The DB URI must be set in the dedicated Databricks secret resource (`MONGODB_URL`) or local ignored `.env`; do not add it to GitHub variables or command arguments. The scanner remains fail-open, so check installation evidence before treating missing months as real gaps. |
 | FST scan returns auth/403/network errors | The bundle does not currently bind FST credentials. Ask the cloud/data owner to verify the account/container, app identity or read-only credential, Azure RBAC/SAS expiry, private endpoint/firewall rules, DNS, and outbound network policy. Do not broaden storage discovery or scan cohort as a workaround. |
